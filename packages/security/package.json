@@ -1,0 +1,63 @@
+{
+  "name": "@celator/security",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./src/index.js",
+      "types": "./src/index.ts"
+    },
+    "./kms": {
+      "import": "./src/kms/index.js",
+      "types": "./src/kms/index.ts"
+    },
+    "./vault": {
+      "import": "./src/vault/index.js",
+      "types": "./src/vault/index.ts"
+    },
+    "./approval": {
+      "import": "./src/approval/index.js",
+      "types": "./src/approval/index.ts"
+    },
+    "./consent": {
+      "import": "./src/consent/index.js",
+      "types": "./src/consent/index.ts"
+    },
+    "./gate": {
+      "import": "./src/gate/index.js",
+      "types": "./src/gate/index.ts"
+    },
+    "./pause": {
+      "import": "./src/pause/index.js",
+      "types": "./src/pause/index.ts"
+    },
+    "./state-machine": {
+      "import": "./src/state-machine/index.js",
+      "types": "./src/state-machine/index.ts"
+    },
+    "./rbac": {
+      "import": "./src/rbac/index.js",
+      "types": "./src/rbac/index.ts"
+    },
+    "./logger": {
+      "import": "./src/logger/index.js",
+      "types": "./src/logger/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "pino": "^9.3.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}

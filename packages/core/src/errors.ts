@@ -1,0 +1,71 @@
+/**
+ * Celator error codes — used in Result<T, ErrorCode> types and audit logs.
+ */
+
+export const ErrorCodes = {
+  // Auth / access
+  UNAUTHORIZED: 'UNAUTHORIZED',
+  FORBIDDEN: 'FORBIDDEN',
+  MFA_REQUIRED: 'MFA_REQUIRED',
+  MFA_STALE: 'MFA_STALE',
+  SESSION_LIMIT_EXCEEDED: 'SESSION_LIMIT_EXCEEDED',
+
+  // Vault
+  VAULT_RECORD_NOT_FOUND: 'VAULT_RECORD_NOT_FOUND',
+  VAULT_CRYPTO_SHREDDED: 'VAULT_CRYPTO_SHREDDED',
+  VAULT_PURPOSE_DENIED: 'VAULT_PURPOSE_DENIED',
+  VAULT_ENCRYPT_FAILED: 'VAULT_ENCRYPT_FAILED',
+  VAULT_DECRYPT_FAILED: 'VAULT_DECRYPT_FAILED',
+  DEK_NOT_FOUND: 'DEK_NOT_FOUND',
+
+  // Approval gate
+  APPROVAL_GATE_BLOCKED: 'APPROVAL_GATE_BLOCKED',
+  SNAPSHOT_NOT_FOUND: 'SNAPSHOT_NOT_FOUND',
+  SNAPSHOT_EXPIRED: 'SNAPSHOT_EXPIRED',
+  SNAPSHOT_INVALID: 'SNAPSHOT_INVALID',
+  SNAPSHOT_SIGNATURE_INVALID: 'SNAPSHOT_SIGNATURE_INVALID',
+  PAYLOAD_HASH_MISMATCH: 'PAYLOAD_HASH_MISMATCH',
+
+  // Consent
+  CONSENT_ACTION_DENIED: 'CONSENT_ACTION_DENIED',
+  CONSENT_MAPPING_IMMUTABLE: 'CONSENT_MAPPING_IMMUTABLE',
+  AUTHORIZATION_NOT_FOUND: 'AUTHORIZATION_NOT_FOUND',
+  AUTHORIZATION_REVOKED: 'AUTHORIZATION_REVOKED',
+  AUTHORIZATION_EXPIRED: 'AUTHORIZATION_EXPIRED',
+
+  // State machine
+  TRANSITION_NOT_ALLOWED: 'TRANSITION_NOT_ALLOWED',
+
+  // Emergency pause
+  EMERGENCY_PAUSE_ACTIVE: 'EMERGENCY_PAUSE_ACTIVE',
+  PAUSE_NOT_FOUND: 'PAUSE_NOT_FOUND',
+  PAUSE_NOT_ACTIVE: 'PAUSE_NOT_ACTIVE',
+
+  // Client
+  CLIENT_NOT_FOUND: 'CLIENT_NOT_FOUND',
+  CLIENT_NOT_ACTIVE: 'CLIENT_NOT_ACTIVE',
+  CLIENT_IDENTITY_UNVERIFIED: 'CLIENT_IDENTITY_UNVERIFIED',
+
+  // General
+  NOT_FOUND: 'NOT_FOUND',
+  VALIDATION_ERROR: 'VALIDATION_ERROR',
+  INTERNAL_ERROR: 'INTERNAL_ERROR',
+  AUDIT_LOG_FAILED: 'AUDIT_LOG_FAILED',
+} as const;
+
+export type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes];
+
+/**
+ * CelatorError — base error class for programming errors (not policy decisions).
+ * Policy decisions should use Result<T, ErrorCode> instead.
+ */
+export class CelatorError extends Error {
+  constructor(
+    public readonly code: ErrorCode,
+    message: string,
+    public readonly context?: Record<string, unknown>,
+  ) {
+    super(message);
+    this.name = 'CelatorError';
+  }
+}

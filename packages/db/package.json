@@ -1,0 +1,30 @@
+{
+  "name": "@celator/db",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./src/index.js",
+      "types": "./src/index.ts"
+    },
+    "./client": {
+      "import": "./generated/client/index.js",
+      "types": "./generated/client/index.d.ts"
+    }
+  },
+  "scripts": {
+    "prisma:generate": "prisma generate",
+    "prisma:validate": "prisma validate",
+    "prisma:migrate": "prisma migrate dev",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.16.0"
+  },
+  "devDependencies": {
+    "prisma": "^5.16.0",
+    "typescript": "^5.5.0"
+  }
+}

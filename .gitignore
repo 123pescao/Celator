@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.env
+.env.local
+.env.*.local
+*.env
+!.env.example
+coverage/
+.nyc_output/
+*.tsbuildinfo
+.DS_Store
+Thumbs.db
+*.log
+pnpm-lock.yaml
+# Prisma
+prisma/migrations/
+generated/

@@ -1,0 +1,24 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: celator_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: celator
+      POSTGRES_PASSWORD: celator
+      POSTGRES_DB: celator
+    ports:
+      - "5432:5432"
+    volumes:
+      - celator_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U celator -d celator"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  celator_pgdata:
+    driver: local

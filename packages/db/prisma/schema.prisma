@@ -1,0 +1,817 @@
+// =============================================================
+// Celator — Prisma Schema (Phase 0: Security Foundation)
+// =============================================================
+// This schema covers the full data model for Phase 0.
+// No browser automation, LLM agents, or real submission tables yet.
+// =============================================================
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =============================================================
+// ENUMS
+// =============================================================
+
+enum ClientStatus {
+  PENDING_IDENTITY_VERIFICATION
+  ACTIVE
+  SUSPENDED
+  DISPUTED
+  CLOSED
+}
+
+enum AuthorizationType {
+  SELF
+  LEGAL_GUARDIAN
+  POWER_OF_ATTORNEY
+  EMPLOYER_SAFETY
+  DECEASED_ESTATE
+  ATTORNEY_CLIENT
+}
+
+enum TaskStatus {
+  FOUND
+  CLASSIFIED
+  MATCH_REVIEW_REQUIRED
+  CLIENT_CONFIRMATION_REQUIRED
+  READY_FOR_OPERATOR_REVIEW
+  OPERATOR_APPROVED
+  OPERATOR_REJECTED
+  READY_TO_SUBMIT
+  SUBMITTED
+  DELIVERED
+  BROKER_CONFIRMED_RECEIPT
+  BROKER_REJECTED
+  MORE_INFO_REQUESTED
+  WAITING_VERIFICATION
+  VERIFIED_REMOVED
+  PARTIALLY_REMOVED
+  FAILED
+  REAPPEARED
+  MANUAL_ONLY
+  ESCALATED
+  FALSE_POSITIVE
+  SKIPPED
+  NEEDS_OPERATOR_REVIEW
+  BLOCKED_CONSENT_SCOPE
+  PAUSED_BY_SYSTEM
+}
+
+enum MatchStatus {
+  CONFIRMED_MATCH
+  CLIENT_CONFIRMED
+  LIKELY_MATCH
+  POSSIBLE_MATCH
+  NEEDS_CLIENT_REVIEW
+  NEEDS_OPERATOR_REVIEW
+  FALSE_POSITIVE
+}
+
+enum SnapshotStatus {
+  ACTIVE
+  EXPIRED
+  USED
+  INVALIDATED
+}
+
+enum RiskTier {
+  STANDARD
+  MEDIUM
+  HIGH
+}
+
+enum ApprovalRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+  CANCELLED
+}
+
+enum OperatorDecision {
+  APPROVED
+  REJECTED
+  ESCALATED
+  NEEDS_MORE_EVIDENCE
+}
+
+enum EmergencyPauseScope {
+  GLOBAL
+  CLIENT
+  BROKER
+  OPERATOR
+  JURISDICTION
+}
+
+enum EmergencyPauseStatus {
+  ACTIVE
+  RESOLVED
+}
+
+enum ActorType {
+  SYSTEM
+  CLIENT
+  OPERATOR
+  ADMIN
+  SERVICE
+}
+
+enum VaultPurposeCode {
+  PURPOSE_OPERATOR_REVIEW_PACKET
+  PURPOSE_FORM_FILL
+  PURPOSE_REPORT_GENERATION
+  PURPOSE_CLIENT_EXPORT
+  PURPOSE_DEK_ROTATION
+}
+
+enum HighRiskFlagType {
+  MINOR_DATA
+  DOMESTIC_VIOLENCE_SAFETY
+  PUBLIC_FIGURE
+  MEDICAL_DATA
+  FINANCIAL_DATA
+  LEGAL_DATA
+  COURT_RECORD
+  PROPERTY_RECORD
+  UNCERTAIN_MATCH
+  ID_DOCUMENT_REQUIRED
+  LEGAL_ESCALATION
+}
+
+enum WarningType {
+  MATCH_CONFIDENCE_LOW
+  PLAYBOOK_NOT_RECENTLY_TESTED
+  PREVIOUSLY_REJECTED_BY_BROKER
+  SENSITIVE_DATA_REQUIRED
+  SAME_OPERATOR_PREPARED
+  HIGH_RISK_FLAG_PRESENT
+  RESUBMISSION
+  SNAPSHOT_APPROACHING_EXPIRY
+  SEGREGATION_OF_DUTIES_REQUIRED
+  PLAYBOOK_EXCEPTION_ACTIVE
+  BROKER_ON_LEGAL_HOLD
+}
+
+enum DekRotationStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+}
+
+enum ActionType {
+  OPT_OUT
+  DELETE_PERSONAL_DATA
+  DO_NOT_SELL
+  DO_NOT_SHARE
+  LIMIT_SENSITIVE_DATA
+  CORRECT_DATA
+  REMOVE_FROM_SEARCH
+  REFRESH_OUTDATED_CONTENT
+  DELETE_ACCOUNT
+  DEACTIVATE_ACCOUNT
+  REMOVE_IMAGE
+  SUPPRESS_PROFILE
+  REPORT_DANGEROUS_EXPOSURE
+  ESCALATE_NON_RESPONSE
+  LEGAL_ESCALATION
+}
+
+enum IdentityVerificationStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+  REQUIRES_DOCUMENT_REVIEW
+}
+
+// =============================================================
+// ORGANIZATIONS & USERS
+// =============================================================
+
+model Organization {
+  id          String   @id @default(cuid())
+  name        String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  isActive    Boolean  @default(true)
+
+  users       User[]
+  clients     Client[]
+
+  @@map("organizations")
+}
+
+model User {
+  id             String   @id @default(cuid())
+  organizationId String
+  email          String   @unique
+  // No password storage — auth via external provider
+  displayName    String
+  isActive       Boolean  @default(true)
+  mfaEnabled     Boolean  @default(false)
+  lastMfaAt      DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization   Organization   @relation(fields: [organizationId], references: [id])
+  userRoles      UserRole[]
+  operatorApprovals OperatorApproval[]
+  auditLogs      AuditLog[]     @relation("AuditActor")
+  qualityMetrics OperatorQualityMetric[]
+  pauseEvents    EmergencyPauseEvent[]
+  warnAcks       OperatorWarningAcknowledgment[]
+
+  @@index([organizationId])
+  @@index([isActive])
+  @@map("users")
+}
+
+model Role {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  createdAt   DateTime @default(now())
+
+  userRoles   UserRole[]
+  permissions RolePermission[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  description String?
+  createdAt   DateTime @default(now())
+
+  rolePermissions RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  id           String   @id @default(cuid())
+  roleId       String
+  permissionId String
+
+  role       Role       @relation(fields: [roleId], references: [id])
+  permission Permission @relation(fields: [permissionId], references: [id])
+
+  @@unique([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserRole {
+  id        String   @id @default(cuid())
+  userId    String
+  roleId    String
+  grantedAt DateTime @default(now())
+  grantedBy String?
+
+  user User @relation(fields: [userId], references: [id])
+  role Role @relation(fields: [roleId], references: [id])
+
+  @@unique([userId, roleId])
+  @@index([userId])
+  @@map("user_roles")
+}
+
+// =============================================================
+// CLIENTS & CONSENT
+// =============================================================
+
+model Client {
+  id             String       @id @default(cuid())
+  organizationId String
+  status         ClientStatus @default(PENDING_IDENTITY_VERIFICATION)
+  displayName    String
+  // No PII stored here — PII lives in IdentityVaultRecord
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  hasDisputeFlag Boolean      @default(false)
+  hasComplianceHold Boolean   @default(false)
+
+  organization         Organization               @relation(fields: [organizationId], references: [id])
+  identityVerifications ClientIdentityVerification[]
+  authorizations        ClientAuthorization[]
+  vaultRecords          IdentityVaultRecord[]
+  cleanupCases          CleanupCase[]
+  highRiskFlags         HighRiskFlag[]
+  pauseEvents           EmergencyPauseEvent[]
+  auditLogs             AuditLog[]                 @relation("AuditClient")
+  portalEvents          ClientPortalEvent[]
+  dataDeletionRequests  ClientDataDeletionRequest[]
+  dekRotationJobs       DekRotationJob[]
+
+  @@index([organizationId])
+  @@index([status])
+  @@map("clients")
+}
+
+model ClientIdentityVerification {
+  id          String                    @id @default(cuid())
+  clientId    String
+  status      IdentityVerificationStatus @default(PENDING)
+  // Operator attestation text (not the document itself)
+  operatorAttestation String?
+  operatorId  String?
+  verifiedAt  DateTime?
+  rejectedAt  DateTime?
+  rejectionReason String?
+  createdAt   DateTime                  @default(now())
+  updatedAt   DateTime                  @updatedAt
+
+  client Client @relation(fields: [clientId], references: [id])
+
+  @@index([clientId])
+  @@index([status])
+  @@map("client_identity_verifications")
+}
+
+model ClientAuthorization {
+  id               String            @id @default(cuid())
+  clientId         String
+  authorizationType AuthorizationType @default(SELF)
+  scopeNames       String[]          // e.g. ["DATA_BROKER_OPT_OUT", "SEARCH_RESULT_REMOVAL"]
+  jurisdiction     String            // e.g. "US-CA", "US", "UK"
+  signedAt         DateTime
+  expiresAt        DateTime?
+  revokedAt        DateTime?
+  revocationReason String?
+  consentVersionId String
+  createdAt        DateTime          @default(now())
+
+  client         Client          @relation(fields: [clientId], references: [id])
+  consentVersion ConsentVersion  @relation(fields: [consentVersionId], references: [id])
+  approvalRequests ApprovalRequest[]
+  cleanupCases   CleanupCase[]
+
+  @@index([clientId])
+  @@index([revokedAt])
+  @@index([expiresAt])
+  @@map("client_authorizations")
+}
+
+model ConsentVersion {
+  id          String   @id @default(cuid())
+  version     String   // semver e.g. "1.0.0"
+  documentHash String  // SHA-256 of the consent document text
+  effectiveFrom DateTime
+  effectiveUntil DateTime?
+  createdAt   DateTime @default(now())
+
+  authorizations ClientAuthorization[]
+
+  @@unique([version])
+  @@index([effectiveFrom])
+  @@map("consent_versions")
+}
+
+// Append-only. Never update or delete rows. See ConsentPolicyService.
+model ConsentScopeMapping {
+  id             String    @id @default(cuid())
+  scopeName      String
+  actionType     ActionType
+  jurisdiction   String    // e.g. "US-CA", "US", "*" for all
+  permitted      Boolean
+  requiredLanguageNote String?
+  effectiveFrom  DateTime
+  effectiveUntil DateTime?
+  createdBy      String    // userId of admin who created
+  createdAt      DateTime  @default(now())
+  // NO updatedAt — this record must never be modified
+
+  @@index([scopeName, actionType, jurisdiction, effectiveFrom])
+  @@map("consent_scope_mappings")
+}
+
+// =============================================================
+// IDENTITY VAULT
+// =============================================================
+
+model IdentityVaultRecord {
+  id              String   @id @default(cuid())
+  clientId        String
+  fieldType       String   // e.g. "EMAIL", "PHONE", "ADDRESS", "DOB", "USERNAME"
+  ciphertext      String   // Base64-encoded AES-256-GCM ciphertext
+  iv              String   // Base64-encoded IV
+  authTag         String   // Base64-encoded GCM auth tag
+  keyId           String   // KMS DEK key identifier (not the key itself)
+  keyVersion      String
+  isCryptoShredded Boolean @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  client     Client              @relation(fields: [clientId], references: [id])
+  accessLogs IdentityVaultAccessLog[]
+  evidenceHolds SnapshotEvidenceHold[] @relation("EvidenceHoldVault")
+
+  @@index([clientId])
+  @@index([clientId, fieldType])
+  @@map("identity_vault_records")
+}
+
+model IdentityVaultAccessLog {
+  id          String           @id @default(cuid())
+  recordId    String
+  clientId    String
+  purposeCode VaultPurposeCode
+  actorId     String
+  actorType   ActorType
+  accessedAt  DateTime         @default(now())
+  // No plaintext, no values — IDs and purposes only
+
+  record IdentityVaultRecord @relation(fields: [recordId], references: [id])
+
+  @@index([recordId])
+  @@index([clientId, accessedAt])
+  @@map("identity_vault_access_logs")
+}
+
+model DekRotationJob {
+  id              String          @id @default(cuid())
+  clientId        String
+  oldKeyVersion   String
+  newKeyVersion   String
+  status          DekRotationStatus @default(PENDING)
+  recordsTotal    Int             @default(0)
+  recordsRotated  Int             @default(0)
+  startedAt       DateTime?
+  completedAt     DateTime?
+  failureReason   String?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  client Client @relation(fields: [clientId], references: [id])
+
+  @@index([clientId, status])
+  @@map("dek_rotation_jobs")
+}
+
+// =============================================================
+// CLEANUP CASES & TASKS
+// =============================================================
+
+model CleanupCase {
+  id              String   @id @default(cuid())
+  clientId        String
+  authorizationId String
+  title           String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  closedAt        DateTime?
+
+  client        Client               @relation(fields: [clientId], references: [id])
+  authorization ClientAuthorization  @relation(fields: [authorizationId], references: [id])
+  tasks         CleanupTask[]
+  timelineEvents CaseTimelineEvent[]
+
+  @@index([clientId])
+  @@map("cleanup_cases")
+}
+
+model CleanupTask {
+  id              String      @id @default(cuid())
+  caseId          String
+  status          TaskStatus  @default(FOUND)
+  actionType      ActionType?
+  matchStatus     MatchStatus @default(NEEDS_OPERATOR_REVIEW)
+  riskTier        RiskTier    @default(STANDARD)
+  sourceRef       String?     // broker/source name
+  findingUrl      String?
+  preparedByUserId String?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  case           CleanupCase           @relation(fields: [caseId], references: [id])
+  approvalRequests ApprovalRequest[]
+  highRiskFlags  HighRiskFlag[]
+  evidenceRecords EvidenceRecord[]
+  timelineEvents CaseTimelineEvent[]   @relation("TaskTimeline")
+
+  @@index([caseId, status])
+  @@index([status])
+  @@index([riskTier, status])
+  @@map("cleanup_tasks")
+}
+
+model AllowedStatusTransition {
+  id         String     @id @default(cuid())
+  fromStatus TaskStatus
+  toStatus   TaskStatus
+  createdAt  DateTime   @default(now())
+
+  @@unique([fromStatus, toStatus])
+  @@map("allowed_status_transitions")
+}
+
+// =============================================================
+// APPROVAL SYSTEM
+// =============================================================
+
+model ApprovalPayloadSnapshot {
+  id               String         @id @default(cuid())
+  taskId           String
+  payloadHash      String         // SHA-256 of canonical JSON payload
+  snapshotSignature String        // HMAC-SHA256 of payloadHash
+  signingKeyVersion String
+  snapshotStatus   SnapshotStatus @default(ACTIVE)
+  snapshotExpiresAt DateTime
+  riskTier         RiskTier
+  actionType       ActionType
+  redactedPreview  String         // Human-readable, PII-redacted summary
+  invalidationReason String?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  approvalRequests ApprovalRequest[]
+  operatorApprovals OperatorApproval[]
+  evidenceHolds    SnapshotEvidenceHold[]
+
+  @@index([taskId])
+  @@index([snapshotStatus, snapshotExpiresAt])
+  @@map("approval_payload_snapshots")
+}
+
+model SnapshotEvidenceHold {
+  id          String    @id @default(cuid())
+  snapshotId  String
+  evidenceId  String?   // EvidenceRecord id if applicable
+  vaultRecordId String? // IdentityVaultRecord id if applicable
+  heldUntil   DateTime
+  releasedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  snapshot  ApprovalPayloadSnapshot @relation(fields: [snapshotId], references: [id])
+  evidence  EvidenceRecord?         @relation(fields: [evidenceId], references: [id])
+  vaultRecord IdentityVaultRecord?  @relation("EvidenceHoldVault", fields: [vaultRecordId], references: [id])
+
+  @@index([snapshotId])
+  @@index([evidenceId])
+  @@map("snapshot_evidence_holds")
+}
+
+model ApprovalRequest {
+  id              String                @id @default(cuid())
+  taskId          String
+  authorizationId String
+  snapshotId      String
+  status          ApprovalRequestStatus @default(PENDING)
+  preparedByUserId String?
+  expiresAt       DateTime
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+
+  task          CleanupTask             @relation(fields: [taskId], references: [id])
+  authorization ClientAuthorization     @relation(fields: [authorizationId], references: [id])
+  snapshot      ApprovalPayloadSnapshot @relation(fields: [snapshotId], references: [id])
+  operatorApproval OperatorApproval?
+  warningAcknowledgments OperatorWarningAcknowledgment[]
+
+  @@index([taskId, status])
+  @@index([status, expiresAt])
+  @@map("approval_requests")
+}
+
+model OperatorApproval {
+  id                String           @id @default(cuid())
+  approvalRequestId String           @unique
+  snapshotId        String
+  operatorId        String
+  decision          OperatorDecision
+  mfaFreshAt        DateTime         // timestamp of last MFA before approval
+  sessionApprovalCount Int           @default(0)
+  reviewStartedAt   DateTime?
+  approvedAt        DateTime         @default(now())
+  notes             String?
+
+  approvalRequest ApprovalRequest         @relation(fields: [approvalRequestId], references: [id])
+  snapshot        ApprovalPayloadSnapshot @relation(fields: [snapshotId], references: [id])
+  operator        User                    @relation(fields: [operatorId], references: [id])
+
+  @@index([operatorId, approvedAt])
+  @@index([snapshotId])
+  @@map("operator_approvals")
+}
+
+model OperatorWarningAcknowledgment {
+  id                String      @id @default(cuid())
+  approvalRequestId String
+  warningType       WarningType
+  operatorId        String
+  acknowledgedAt    DateTime    @default(now())
+
+  approvalRequest ApprovalRequest @relation(fields: [approvalRequestId], references: [id])
+  operator        User            @relation(fields: [operatorId], references: [id])
+
+  @@unique([approvalRequestId, warningType])
+  @@map("operator_warning_acknowledgments")
+}
+
+model OperatorQualityMetric {
+  id                        String   @id @default(cuid())
+  operatorId                String
+  sessionId                 String
+  approvalsInSession        Int      @default(0)
+  rejectionsInSession       Int      @default(0)
+  avgReviewTimeSecondsSession Float  @default(0)
+  bulkApprovalAttempted     Boolean  @default(false)
+  selfApprovalFlagged       Boolean  @default(false)
+  highRiskApprovalsInSession Int     @default(0)
+  sessionStartedAt          DateTime
+  sessionEndedAt            DateTime?
+  createdAt                 DateTime @default(now())
+
+  operator User @relation(fields: [operatorId], references: [id])
+
+  @@index([operatorId, createdAt])
+  @@map("operator_quality_metrics")
+}
+
+// =============================================================
+// EMERGENCY PAUSE
+// =============================================================
+
+model EmergencyPauseEvent {
+  id             String               @id @default(cuid())
+  scope          EmergencyPauseScope
+  scopeRef       String?              // clientId, operatorId, brokerId, or jurisdiction string
+  status         EmergencyPauseStatus @default(ACTIVE)
+  reason         String
+  triggeredBy    String               // userId
+  triggeredAt    DateTime             @default(now())
+  resolvedBy     String?
+  resolvedAt     DateTime?
+  resolutionSummary String?
+  // For GLOBAL pause: requires 2-admin consensus (Phase 0 scaffolds this)
+  requiresDualAdmin Boolean           @default(false)
+  secondAdminApprovedBy String?
+  secondAdminApprovedAt DateTime?
+
+  triggerer User  @relation(fields: [triggeredBy], references: [id])
+  client    Client? @relation(fields: [scopeRef], references: [id], map: "emergency_pause_client_fk")
+
+  @@index([status, scope])
+  @@index([scopeRef, status])
+  @@map("emergency_pause_events")
+}
+
+// =============================================================
+// AUDIT LOG
+// =============================================================
+
+model AuditLog {
+  id          String    @id @default(cuid())
+  eventType   String    // e.g. "APPROVAL_GATE_BLOCKED", "SNAPSHOT_CREATED", "CONSENT_REVOKED"
+  actorId     String?
+  actorType   ActorType
+  clientId    String?
+  resourceId  String?   // ID of the affected resource
+  resourceType String?  // e.g. "CleanupTask", "ApprovalRequest"
+  outcome     String    // "ALLOWED", "BLOCKED", "ERROR"
+  blockedBy   String[]  // Which checks blocked, if any
+  metadata    Json?     // Safe metadata — NO PII
+  createdAt   DateTime  @default(now())
+
+  actor  User?   @relation("AuditActor", fields: [actorId], references: [id])
+  client Client? @relation("AuditClient", fields: [clientId], references: [id])
+
+  @@index([clientId, createdAt])
+  @@index([actorId, createdAt])
+  @@index([eventType, createdAt])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// =============================================================
+// CASE TIMELINE
+// =============================================================
+
+model CaseTimelineEvent {
+  id           String    @id @default(cuid())
+  caseId       String
+  taskId       String?
+  eventType    String
+  fromStatus   TaskStatus?
+  toStatus     TaskStatus?
+  actorId      String?
+  actorType    ActorType
+  note         String?
+  createdAt    DateTime  @default(now())
+
+  case CleanupCase  @relation(fields: [caseId], references: [id])
+  task CleanupTask? @relation("TaskTimeline", fields: [taskId], references: [id])
+
+  @@index([caseId, createdAt])
+  @@index([taskId, createdAt])
+  @@map("case_timeline_events")
+}
+
+// =============================================================
+// EVIDENCE
+// =============================================================
+
+model EvidenceRecord {
+  id              String   @id @default(cuid())
+  taskId          String
+  storageKey      String   // Object storage path — not the content
+  contentHash     String   // SHA-256 of stored content
+  evidenceType    String   // "SCREENSHOT", "EMAIL", "CONFIRMATION", "VERIFICATION"
+  mimeType        String?
+  sizeBytes       Int?
+  isImmutable     Boolean  @default(false)
+  retainUntil     DateTime?
+  createdAt       DateTime @default(now())
+
+  task         CleanupTask            @relation(fields: [taskId], references: [id])
+  evidenceHolds SnapshotEvidenceHold[]
+
+  @@index([taskId])
+  @@map("evidence_records")
+}
+
+// =============================================================
+// HIGH RISK FLAGS
+// =============================================================
+
+model HighRiskFlag {
+  id         String          @id @default(cuid())
+  clientId   String
+  taskId     String?
+  flagType   HighRiskFlagType
+  flaggedBy  String          // userId
+  flaggedAt  DateTime        @default(now())
+  resolvedAt DateTime?
+  resolvedBy String?
+  notes      String?
+
+  client Client      @relation(fields: [clientId], references: [id])
+  task   CleanupTask? @relation(fields: [taskId], references: [id])
+
+  @@index([clientId, resolvedAt])
+  @@index([taskId])
+  @@map("high_risk_flags")
+}
+
+// =============================================================
+// LEGAL HOLD SOURCES
+// =============================================================
+
+model LegalHoldSource {
+  id          String   @id @default(cuid())
+  sourceRef   String   @unique // broker name, domain, or identifier
+  reason      String
+  heldBy      String   // userId
+  heldAt      DateTime @default(now())
+  releasedAt  DateTime?
+  releasedBy  String?
+
+  @@index([releasedAt])
+  @@map("legal_hold_sources")
+}
+
+// =============================================================
+// CLIENT PORTAL EVENTS
+// =============================================================
+
+model ClientPortalEvent {
+  id         String   @id @default(cuid())
+  clientId   String
+  eventType  String   // "LOGIN", "CONSENT_SIGNED", "MATCH_CONFIRMED", "CONSENT_REVOKED"
+  ipHash     String?  // Hashed IP — not raw IP
+  metadata   Json?    // Safe metadata only
+  createdAt  DateTime @default(now())
+
+  client Client @relation(fields: [clientId], references: [id])
+
+  @@index([clientId, createdAt])
+  @@map("client_portal_events")
+}
+
+// =============================================================
+// CLIENT DATA DELETION REQUESTS
+// =============================================================
+
+model ClientDataDeletionRequest {
+  id                String    @id @default(cuid())
+  clientId          String
+  requestedAt       DateTime  @default(now())
+  requestedBy       String    // userId or "CLIENT_SELF"
+  completedAt       DateTime?
+  retainedRecords   Json?     // What was kept and why (legal hold, audit retention)
+  cryptoShredded    Boolean   @default(false)
+  cryptoShredAt     DateTime?
+  notes             String?
+
+  client Client @relation(fields: [clientId], references: [id])
+
+  @@index([clientId])
+  @@map("client_data_deletion_requests")
+}
