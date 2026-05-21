@@ -96,25 +96,107 @@ For developer testing only. **Not production-ready auth** — uses `X-Dev-Actor-
 
 ## Local development setup
 
+### 1. Start Postgres
+
+**Podman (recommended on this machine):**
 ```bash
-# 1. Start the database
+podman run -d \
+  --name celator-postgres \
+  -e POSTGRES_USER=celator \
+  -e POSTGRES_PASSWORD=celator \
+  -e POSTGRES_DB=celator \
+  -p 5432:5432 \
+  postgres:16-alpine
+
+# Or using compose (podman-compose or docker compose):
+podman-compose up -d
+```
+
+**Docker:**
+```bash
 docker compose up -d
+```
 
-# 2. Set up environment
+Verify the container is running:
+```bash
+podman ps | grep celator-postgres
+# or
+docker ps | grep celator-postgres
+```
+
+### 2. Configure environment
+
+```bash
 cp .env.example .env
-# Edit LOCAL_KMS_MASTER_SECRET and LOCAL_KMS_SIGNING_SECRET
+# Edit at minimum:
+#   LOCAL_KMS_MASTER_SECRET=<any 32+ char string for local dev>
+#   LOCAL_KMS_SIGNING_SECRET=<any 32+ char string for local dev>
+# DATABASE_URL is pre-set to localhost:5432/celator in .env.example
+```
 
-# 3. Generate Prisma client
+### 3. Generate Prisma client and apply migrations
+
+```bash
+# Generate the Prisma client (required after schema changes)
 pnpm prisma:generate
 
-# 4. Apply migrations
+# Apply all migrations to the running database
 pnpm --filter @celator/db prisma:migrate:deploy
 
-# 5. Start the dev server
-pnpm dev
+# Verify — should print "Database schema is up to date"
+pnpm --filter @celator/db exec prisma migrate status
+```
 
-# 6. Run tests
+### 4. Start the dev server
+
+```bash
+pnpm dev
+# API starts at http://127.0.0.1:3000 (configurable via API_PORT / API_HOST in .env)
+```
+
+### 5. Run manual curl checks
+
+```bash
+# Health check
+curl -s http://127.0.0.1:3000/health | jq .
+# Expected: { "ok": true, "service": "celator-api", ... }
+
+# Security status (Phase 1A runtime hardening)
+curl -s http://127.0.0.1:3000/security/status | jq .
+# Expected: { "ok": true, "database": { "reachable": true, "latencyMs": <n> }, "phase": "PHASE_1A_DB_CASE_MANAGEMENT", ... }
+
+# DB-backed endpoint smoke test
+curl -s http://127.0.0.1:3000/api/v1/organizations/org_001/clients | jq .
+# Expected: { "ok": true, "clients": [] }  (empty list — no data seeded yet)
+```
+
+### 6. Run the automated verification script
+
+```bash
+bash scripts/verify-phase1a-runtime.sh
+# Optional: target a different API host
+bash scripts/verify-phase1a-runtime.sh --api-url http://127.0.0.1:3000
+```
+
+The script checks:
+- Node.js ≥ 20 and pnpm are available
+- The `celator-postgres` container is running
+- `prisma migrate status` reports no pending migrations
+- `/health` returns `ok: true`
+- `/security/status` returns `ok: true` with `database.reachable: true`
+- The phase field shows `PHASE_1A_DB_CASE_MANAGEMENT`
+- A DB-backed route responds without crashing
+
+Exit code 0 = all checks passed. Non-zero = one or more failures (see output).
+
+### 7. Run tests
+
+```bash
+# All unit tests (no live DB required)
 pnpm test
+
+# With coverage
+pnpm test:coverage
 ```
 
 ---
@@ -132,6 +214,7 @@ All services have unit tests using mock repositories (no DB required):
 | `cleanup-task.service.test.ts` | Create, allowed/blocked transitions, audit on block |
 | `consent-workflow.service.test.ts` | Version creation, auth create/revoke, scope coverage |
 | `review-packet.service.test.ts` | Packet create with validation, snapshot expiry, auth check |
+| `db-health.test.ts` | `checkDbHealth` reachable, ECONNREFUSED, ENOTFOUND, auth error, timeout, no-credential leakage |
 
 ### Integration tests (`packages/core/src/__tests__/integration/`)
 

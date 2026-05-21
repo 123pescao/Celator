@@ -1,7 +1,8 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { EmergencyPauseService } from '@celator/security/pause';
+import { checkDbHealth } from '@celator/db';
 
-// Singleton pause service for Phase 0 (Phase 1 will inject via DI container)
+// Singleton pause service — in-memory, safe for Phase 1A
 const pauseService = new EmergencyPauseService();
 
 export const securityStatusRoutes: FastifyPluginAsync = async (fastify) => {
@@ -9,7 +10,9 @@ export const securityStatusRoutes: FastifyPluginAsync = async (fastify) => {
     const activePauses = pauseService.listActivePauses();
     const isAnyPauseActive = activePauses.length > 0;
 
-    // Safe status — no secrets, no PII, no internal IDs
+    const dbHealth = await checkDbHealth();
+
+    // Safe status — no secrets, no PII, no internal IDs, no DATABASE_URL
     return reply.code(200).send({
       ok: true,
       environment: process.env['NODE_ENV'] ?? 'unknown',
@@ -17,15 +20,13 @@ export const securityStatusRoutes: FastifyPluginAsync = async (fastify) => {
         active: isAnyPauseActive,
         activePauseCount: activePauses.length,
         scopes: activePauses.map((p) => p.scope),
-        // No pauseIds, no reasons, no actor info in this endpoint
       },
       database: {
-        // Phase 0: No live DB connection in this status check.
-        // Phase 1: Check Prisma $connect with a timeout.
-        reachable: false,
-        note: 'Phase 0: DB health check not yet implemented',
+        reachable: dbHealth.reachable,
+        ...(dbHealth.latencyMs !== undefined ? { latencyMs: dbHealth.latencyMs } : {}),
+        ...(dbHealth.error !== undefined ? { error: dbHealth.error } : {}),
       },
-      phase: 'PHASE_0_SECURITY_FOUNDATION',
+      phase: 'PHASE_1A_DB_CASE_MANAGEMENT',
       version: '0.0.1',
       timestamp: new Date().toISOString(),
     });
