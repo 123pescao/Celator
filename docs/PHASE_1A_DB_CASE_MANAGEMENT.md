@@ -199,6 +199,97 @@ pnpm test
 pnpm test:coverage
 ```
 
+### 8. Run integration tests (requires Postgres)
+
+```bash
+# DATABASE_URL must be set (pre-configured in .env from step 2)
+pnpm test:integration
+# Or explicitly:
+pnpm --filter @celator/core test:integration
+```
+
+Integration tests use the `it_` and `smoke_` prefixes for test data and clean up after each run. They do **not** touch non-test data.
+
+### 9. Run the full workflow smoke script
+
+The API must be running (`pnpm dev`) before running the smoke test.
+
+```bash
+bash scripts/smoke-phase1a-api-workflow.sh
+# Or with a different API host:
+bash scripts/smoke-phase1a-api-workflow.sh --api-url http://127.0.0.1:3000
+```
+
+The smoke script exercises the complete operator workflow end-to-end via the HTTP API:
+organization → user → client → identity verification → activation → consent version → authorization → case → task → review packet → approval → timeline → audit logs
+
+It also validates that bad requests return 400, nonexistent resources return 404, and error responses contain no stack traces.
+
+### 10. Clean up test data
+
+If integration or smoke tests leave residual data, clean it up with:
+
+```bash
+bash scripts/reset-phase1a-test-data.sh
+# Skip confirmation prompt:
+bash scripts/reset-phase1a-test-data.sh --yes
+```
+
+The reset script only deletes rows matching the `it_` / `smoke_` organization name prefixes and `999.x.x` consent versions. It prints the row counts before deletion and requires confirmation unless `--yes` is passed.
+
+### 11. Run the verification script with full workflow
+
+```bash
+# Lightweight (no API required):
+bash scripts/verify-phase1a-runtime.sh
+
+# Full workflow including smoke test (API must be running):
+bash scripts/verify-phase1a-runtime.sh --full-workflow
+```
+
+---
+
+## Phase 1B additions
+
+Phase 1B added the following on top of the Phase 1A DB core:
+
+### New API endpoints
+
+| Route | Purpose |
+|---|---|
+| `POST /api/v1/organizations` | Create an organization |
+| `GET /api/v1/organizations/:id` | Get an organization |
+| `POST /api/v1/users` | Create an operator user |
+| `GET /api/v1/users/:id` | Get a user |
+| `POST /api/v1/clients/:clientId/identity-verification` | Create a verification record |
+| `GET /api/v1/clients/:clientId/identity-verification` | Get latest verification record |
+| `POST /api/v1/identity-verifications/:id/attest` | Record operator attestation |
+| `POST /api/v1/identity-verifications/:id/complete` | Complete verification (activates client) |
+| `POST /api/v1/identity-verifications/:id/reject` | Reject verification |
+| `GET /api/v1/cases/:caseId/timeline` | Get case timeline events |
+| `GET /api/v1/clients/:clientId/audit-logs` | Get audit logs for a client |
+| `POST /api/v1/approval-requests/:id/approve` | Approve shorthand (APPROVED decision) |
+| `POST /api/v1/approval-requests/:id/reject` | Reject shorthand (REJECTED decision) |
+
+### New scripts
+
+| Script | Purpose |
+|---|---|
+| `scripts/smoke-phase1a-api-workflow.sh` | End-to-end API workflow smoke test |
+| `scripts/reset-phase1a-test-data.sh` | Delete only test-prefixed data from the DB |
+
+### New tests
+
+| Test | Type | Purpose |
+|---|---|---|
+| `phase1a-workflow.integration.test.ts` | Integration (real DB) | Full workflow: org → approval → audit verification |
+
+### ⚠ Important: approval does not mean submission
+
+**Phase 1B approval records that an operator reviewed and approved a cleanup task. It does NOT trigger any external submission, deletion request, opt-out, or automated action. No external systems are contacted.**
+
+Phase 1C and later phases may add submission capability — always behind an additional operator-controlled gate, never automatically.
+
 ---
 
 ## Test structure
@@ -218,7 +309,11 @@ All services have unit tests using mock repositories (no DB required):
 
 ### Integration tests (`packages/core/src/__tests__/integration/`)
 
-See [integration/README.md](../packages/core/src/__tests__/integration/README.md) — requires a live DB.
+Requires a live DB. Run with `pnpm test:integration`.
+
+| Test file | Coverage |
+|---|---|
+| `phase1a-workflow.integration.test.ts` | Full org→approval workflow, PII-in-audit check, revocation blocks, validation guards |
 
 ---
 
@@ -231,11 +326,25 @@ See [integration/README.md](../packages/core/src/__tests__/integration/README.md
 
 ---
 
-## Phase 0 open items remaining (unchanged)
+## Out of scope (Phase 1B and earlier)
 
-- Check 20 (duplicate detection): scaffolded comment, requires Phase 1B
+- Browser automation or scraping
+- LLM integration
+- Email or notification sending
+- Deletion submission, opt-out submission, or any external request to a data broker
+- Account deletion on any platform
+- Google/search result removal
+- Payment or billing
+- Frontend dashboard or client portal UI
+- Production authentication provider
+
+---
+
+## Phase 0 open items remaining (carry to Phase 1C)
+
+- Check 20 (duplicate detection): scaffolded comment, requires Phase 1C
 - Check 21 (CAPTCHA/login preflight): requires browser automation, out of scope
-- GLOBAL pause dual-admin enforcement: data model in place, workflow enforcement is Phase 1B
-- Async HMAC signature verification: `canExecuteSubmission()` is synchronous; Phase 1A uses SHA-256 hash placeholder (`sha256:${payloadHash}`), full HMAC is Phase 1B
-- Audit log tamper protection: in-DB only, external write-once store is Phase 1B
-- DB-level triggers for status transitions: Phase 1B
+- GLOBAL pause dual-admin enforcement: data model in place, workflow enforcement is Phase 1C
+- Async HMAC signature verification: `canExecuteSubmission()` is synchronous; Phase 1A uses SHA-256 hash placeholder (`sha256:${payloadHash}`), full HMAC is Phase 1C
+- Audit log tamper protection: in-DB only, external write-once store is Phase 1C
+- DB-level triggers for status transitions: Phase 1C

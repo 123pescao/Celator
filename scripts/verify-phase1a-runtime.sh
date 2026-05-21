@@ -18,6 +18,7 @@ set -euo pipefail
 # ── Configurable ──────────────────────────────────────────────────────────────
 API_URL="http://127.0.0.1:3000"
 CONTAINER_NAME="celator-postgres"
+FULL_WORKFLOW=false
 PASS_SYMBOL="✓"
 FAIL_SYMBOL="✗"
 SKIP_SYMBOL="–"
@@ -25,6 +26,7 @@ SKIP_SYMBOL="–"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --api-url) API_URL="$2"; shift 2 ;;
+    --full-workflow) FULL_WORKFLOW=true; shift ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -185,11 +187,34 @@ else
   pass "GET /api/v1/organizations/:orgId/clients: HTTP ${ORGS_RESPONSE} (API is routing)"
 fi
 
+# ── Section 6: Full workflow smoke test (optional) ────────────────────────────
+if $FULL_WORKFLOW; then
+  header "Full API workflow smoke test"
+
+  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+  SMOKE_SCRIPT="${SCRIPT_DIR}/smoke-phase1a-api-workflow.sh"
+
+  if [[ ! -f "$SMOKE_SCRIPT" ]]; then
+    fail "smoke script not found: ${SMOKE_SCRIPT}"
+  elif ! command -v curl &>/dev/null; then
+    fail "curl not available — cannot run smoke test"
+  else
+    echo "  Running: bash ${SMOKE_SCRIPT} --api-url ${API_URL}"
+    echo
+    if bash "$SMOKE_SCRIPT" --api-url "$API_URL"; then
+      pass "Full API workflow smoke test: all steps passed"
+    else
+      fail "Full API workflow smoke test: one or more steps failed (see above)"
+    fi
+  fi
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo
 echo "════════════════════════════════════════════════════════"
 if [[ $FAILURES -eq 0 ]]; then
   echo "  ALL CHECKS PASSED"
+  if $FULL_WORKFLOW; then echo "  (including full API workflow smoke test)"; fi
   echo "════════════════════════════════════════════════════════"
   exit 0
 else

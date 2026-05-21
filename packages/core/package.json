@@ -14,7 +14,8 @@
     "build": "tsc",
     "lint": "eslint src",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
     "@celator/db": "workspace:*",

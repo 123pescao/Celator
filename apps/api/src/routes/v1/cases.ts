@@ -30,7 +30,7 @@ const TransitionTaskBody = z.object({
 });
 
 export const caseRoutes: FastifyPluginAsync<{ services: AppServices }> = async (fastify, opts) => {
-  const { caseService, taskService } = opts.services;
+  const { caseService, taskService, timeline } = opts.services;
 
   // Cases
   fastify.post('/cases', async (request, reply) => {
@@ -117,5 +117,12 @@ export const caseRoutes: FastifyPluginAsync<{ services: AppServices }> = async (
     if (!taskResult.ok) return reply.code(404).send({ ok: false, error: taskResult.error });
     const allowed = taskService.getAllowedTransitions(taskResult.value.status);
     return reply.send({ ok: true, currentStatus: taskResult.value.status, allowedTransitions: allowed });
+  });
+
+  // Case timeline
+  fastify.get('/cases/:caseId/timeline', async (request, reply) => {
+    const { caseId } = request.params as { caseId: string };
+    const events = await timeline.listForCase(caseId);
+    return reply.send({ ok: true, events });
   });
 };

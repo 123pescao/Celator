@@ -14,6 +14,7 @@
     "lint": "pnpm -r lint",
     "test": "pnpm -r test",
     "test:coverage": "pnpm -r test:coverage",
+    "test:integration": "pnpm --filter @celator/core test:integration",
     "prisma:generate": "pnpm --filter @celator/db prisma:generate",
     "prisma:validate": "pnpm --filter @celator/db prisma:validate",
     "prisma:migrate": "pnpm --filter @celator/db prisma:migrate"
