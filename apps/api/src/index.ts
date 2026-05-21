@@ -17,6 +17,11 @@ import helmet from '@fastify/helmet';
 import { createLogger } from '@celator/security/logger';
 import { healthRoutes } from './routes/health.js';
 import { securityStatusRoutes } from './routes/security-status.js';
+import { clientRoutes } from './routes/v1/clients.js';
+import { caseRoutes } from './routes/v1/cases.js';
+import { reviewPacketRoutes } from './routes/v1/review-packets.js';
+import { consentRoutes } from './routes/v1/consent.js';
+import { buildServices } from './services-factory.js';
 
 const logger = createLogger({ name: 'celator-api' });
 
@@ -24,6 +29,8 @@ const PORT = parseInt(process.env['API_PORT'] ?? '3000', 10);
 const HOST = process.env['API_HOST'] ?? '127.0.0.1';
 
 async function start(): Promise<void> {
+  const { services } = buildServices();
+
   const fastify = Fastify({
     logger: false, // We use pino directly via createLogger
     disableRequestLogging: true,
@@ -60,6 +67,12 @@ async function start(): Promise<void> {
   // Routes
   await fastify.register(healthRoutes);
   await fastify.register(securityStatusRoutes);
+
+  // Phase 1A — developer testing endpoints (prefix /api/v1)
+  await fastify.register(clientRoutes, { prefix: '/api/v1', services });
+  await fastify.register(caseRoutes, { prefix: '/api/v1', services });
+  await fastify.register(reviewPacketRoutes, { prefix: '/api/v1', services });
+  await fastify.register(consentRoutes, { prefix: '/api/v1', services });
 
   // Global error handler — never expose stack traces in responses
   fastify.setErrorHandler((error, request, reply) => {

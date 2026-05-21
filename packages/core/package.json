@@ -12,13 +12,19 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc",
-    "lint": "eslint src"
+    "lint": "eslint src",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
+    "@celator/db": "workspace:*",
+    "@celator/security": "workspace:*",
     "zod": "^3.23.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
-    "typescript": "^5.5.0"
+    "@vitest/coverage-v8": "2.1.9",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
   }
 }

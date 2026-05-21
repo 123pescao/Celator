@@ -29,6 +29,9 @@ importers:
       '@celator/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@celator/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@celator/security':
         specifier: workspace:*
         version: link:../../packages/security
@@ -60,6 +63,12 @@ importers:
 
   packages/core:
     dependencies:
+      '@celator/db':
+        specifier: workspace:*
+        version: link:../db
+      '@celator/security':
+        specifier: workspace:*
+        version: link:../security
       zod:
         specifier: ^3.23.0
         version: 3.25.76
@@ -67,9 +76,15 @@ importers:
       '@types/node':
         specifier: ^20.14.0
         version: 20.19.41
+      '@vitest/coverage-v8':
+        specifier: 2.1.9
+        version: 2.1.9(vitest@2.1.9(@types/node@20.19.41))
       typescript:
         specifier: ^5.5.0
         version: 5.9.3
+      vitest:
+        specifier: ^2.0.0
+        version: 2.1.9(@types/node@20.19.41)
 
   packages/db:
     dependencies:
@@ -77,6 +92,9 @@ importers:
         specifier: ^5.16.0
         version: 5.22.0(prisma@5.22.0)
     devDependencies:
+      '@types/node':
+        specifier: ^20.14.0
+        version: 20.19.41
       prisma:
         specifier: ^5.16.0
         version: 5.22.0

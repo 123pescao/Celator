@@ -12,7 +12,6 @@ coverage/
 Thumbs.db
 *.log
 # Prisma
-prisma/migrations/
 generated/
 # Keys and certificates — never commit private key material
 *.pem

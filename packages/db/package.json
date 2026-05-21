@@ -17,6 +17,8 @@
     "prisma:generate": "prisma generate",
     "prisma:validate": "prisma validate",
     "prisma:migrate": "prisma migrate dev",
+    "prisma:migrate:deploy": "prisma migrate deploy",
+    "prisma:migrate:create-only": "prisma migrate dev --create-only",
     "typecheck": "tsc --noEmit",
     "build": "tsc",
     "lint": "eslint src"
@@ -25,6 +27,7 @@
     "@prisma/client": "^5.16.0"
   },
   "devDependencies": {
+    "@types/node": "^20.14.0",
     "prisma": "^5.16.0",
     "typescript": "^5.5.0"
   }
