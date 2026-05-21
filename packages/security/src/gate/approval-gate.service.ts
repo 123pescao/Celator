@@ -245,12 +245,14 @@ export class ApprovalGateService {
 
     // ─── Check 12: Operator has permission for this org/client ─
     if (ctx.approval && ctx.operator) {
-      if (ctx.approval.operatorOrganizationId !== ctx.client?.id?.split('_')[0]) {
-        // Phase 0: org check is simplified — in production, verify against DB
-        // We check that the operator's org was recorded at approval time
-        if (!ctx.approval.operatorOrganizationId) {
-          blockedBy.push('CHECK_12_FAILED: operator organization not recorded on approval — cannot verify access');
-        }
+      if (!ctx.approval.operatorOrganizationId) {
+        blockedBy.push('CHECK_12_FAILED: operator organization not recorded on approval — cannot verify access');
+      } else if (ctx.approval.operatorOrganizationId !== ctx.operator.organizationId) {
+        blockedBy.push(
+          `CHECK_12_FAILED: approval was recorded for organization "${ctx.approval.operatorOrganizationId}" ` +
+            `but the approving operator belongs to "${ctx.operator.organizationId}". ` +
+            `Cross-organization approvals are not permitted.`,
+        );
       }
     } else if (!ctx.approval) {
       blockedBy.push('CHECK_12_FAILED: no approval to verify operator organization');
@@ -282,6 +284,24 @@ export class ApprovalGateService {
       }
     }
 
+    // ─── Check 14b: Minimum review time enforced ──────────────
+    // Guards against rubber-stamp approvals — operator must spend a minimum
+    // amount of time reviewing the packet based on the task's risk tier.
+    if (ctx.approval?.reviewStartedAt) {
+      const elapsedSeconds =
+        (ctx.approval.approvedAt.getTime() - ctx.approval.reviewStartedAt.getTime()) / 1000;
+      const minSeconds =
+        MIN_REVIEW_TIME_SECONDS[ctx.task?.riskTier ?? 'STANDARD'] ?? 60;
+      if (elapsedSeconds < minSeconds) {
+        blockedBy.push(
+          `CHECK_14b_FAILED: operator reviewed this task for only ${Math.round(elapsedSeconds)}s ` +
+            `but the minimum for ${ctx.task?.riskTier ?? 'STANDARD'} risk is ${minSeconds}s. ` +
+            `Rubber-stamp approvals are not permitted.`,
+        );
+        requiredActions.push('Operator must spend the minimum required time reviewing the packet');
+      }
+    }
+
     // ─── Check 15: Payload hash matches approved payload hash ─
     if (ctx.approval && ctx.currentPayloadHash) {
       if (ctx.approval.approvedPayloadHash !== ctx.currentPayloadHash) {
@@ -293,6 +313,20 @@ export class ApprovalGateService {
       }
     } else if (!ctx.approval) {
       blockedBy.push('CHECK_15_FAILED: no approval to verify payload hash');
+    }
+
+    // ─── Check 15b: Snapshot payloadHash matches current hash ─
+    // Prevents snapshot substitution: if someone swaps the snapshot for a
+    // different one (even one with a valid signature), the snapshot's own
+    // payloadHash must still equal the payload being submitted.
+    if (ctx.snapshot && ctx.currentPayloadHash) {
+      if (ctx.snapshot.payloadHash !== ctx.currentPayloadHash) {
+        blockedBy.push(
+          'CHECK_15b_FAILED: snapshot payloadHash does not match the current payload hash. ' +
+            'The snapshot may have been substituted. Re-generate the review packet.',
+        );
+        requiredActions.push('Generate a new review packet and re-submit for operator approval');
+      }
     }
 
     // ─── Check 16: Snapshot signature is valid ───────────────

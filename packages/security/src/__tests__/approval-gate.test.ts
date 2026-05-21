@@ -271,6 +271,158 @@ describe('ApprovalGateService — canExecuteSubmission', () => {
     });
   });
 
+  describe('blocks on operator organization mismatch (Check 12)', () => {
+    it('blocks when approval operator organization differs from current operator organization', async () => {
+      const services = makeGateServices();
+      const ctx = await makeValidGateContext(services);
+      ctx.approval = makeTestApproval(ctx.currentPayloadHash, {
+        operatorOrganizationId: 'foreign_org_999',
+      });
+      const result = services.gate.canExecuteSubmission(ctx);
+      expect(result.allowed).toBe(false);
+      expect(result.blockedBy.some((b) => b.includes('CHECK_12_FAILED'))).toBe(true);
+    });
+
+    it('blocks when approval has no operator organization recorded', async () => {
+      const services = makeGateServices();
+      const ctx = await makeValidGateContext(services);
+      ctx.approval = makeTestApproval(ctx.currentPayloadHash, {
+        operatorOrganizationId: '',
+      });
+      const result = services.gate.canExecuteSubmission(ctx);
+      expect(result.allowed).toBe(false);
+      expect(result.blockedBy.some((b) => b.includes('CHECK_12_FAILED'))).toBe(true);
+    });
+
+    it('allows when approval operator organization matches current operator organization', async () => {
+      const services = makeGateServices();
+      const ctx = await makeValidGateContext(services);
+      // Both default to TEST_ORG_ID — verify the happy path is not broken
+      const result = services.gate.canExecuteSubmission(ctx);
+      expect(result.allowed).toBe(true);
+    });
+  });
+
+  describe('blocks on stale MFA at approval time (Check 13)', () => {
+    it('blocks when MFA was older than the freshness window at approval time', async () => {
+      const services = makeGateServices();
+      const ctx = await makeValidGateContext(services);
+      const approvedAt = new Date();
+      // MFA was 5 hours ago, freshness window defaults to 4 hours
+      const mfaAt = new Date(approvedAt.getTime() - 5 * 60 * 60 * 1000);
+      ctx.approval = makeTestApproval(ctx.currentPayloadHash, {
+        approvedAt,
+        mfaFreshAt: mfaAt,
+      });
+      const result = services.gate.canExecuteSubmission(ctx);
+      expect(result.allowed).toBe(false);
+      expect(result.blockedBy.some((b) => b.includes('CHECK_13_FAILED'))).toBe(true);
+    });
+
+    it('allows when MFA was fresh at approval time', async () => {
+      const services = makeGateServices();
+      const ctx = await makeValidGateContext(services);
+      // default fixture: mfaFreshAt is 5 minutes before approvedAt — within the 4-hour window
+      const result = services.gate.canExecuteSubmission(ctx);
+      expect(result.allowed).toBe(true);
+    });
+  });
+
+  describe('blocks when session approval count exceeds limit (Check 14)', () => {
+    it('blocks when operator has exceeded max approvals per session', async () => {
+      const services = makeGateServices();
+      const ctx = await makeValidGateContext(services);
+      ctx.approval = makeTestApproval(ctx.currentPayloadHash, {
+        sessionApprovalCount: 999,
+      });
+      const result = services.gate.canExecuteSubmission(ctx);
+      expect(result.allowed).toBe(false);
+      expect(result.blockedBy.some((b) => b.includes('CHECK_14_FAILED'))).toBe(true);
+    });
+  });
+
+  describe('blocks on rubber-stamp approval (Check 14b)', () => {
+    it('blocks when review time was below minimum for the risk tier', async () => {
+      const services = makeGateServices();
+      const ctx = await makeValidGateContext(services);
+      const approvedAt = new Date();
+      // Only 5 seconds of review — well below the 60s STANDARD minimum
+      const reviewStartedAt = new Date(approvedAt.getTime() - 5 * 1000);
+      ctx.approval = makeTestApproval(ctx.currentPayloadHash, {
+        approvedAt,
+        reviewStartedAt,
+      });
+      const result = services.gate.canExecuteSubmission(ctx);
+      expect(result.allowed).toBe(false);
+      expect(result.blockedBy.some((b) => b.includes('CHECK_14b_FAILED'))).toBe(true);
+    });
+
+    it('allows when review time meets the minimum', async () => {
+      const services = makeGateServices();
+      const ctx = await makeValidGateContext(services);
+      // default fixture: reviewStartedAt = now - 3 minutes, well above 60s minimum
+      const result = services.gate.canExecuteSubmission(ctx);
+      expect(result.allowed).toBe(true);
+    });
+  });
+
+  describe('blocks when snapshot payloadHash does not match current hash (Check 15b)', () => {
+    it('blocks when snapshot payloadHash has been tampered', async () => {
+      const services = makeGateServices();
+      const ctx = await makeValidGateContext(services);
+      // Replace the snapshot with one that has a different payloadHash
+      // while leaving currentPayloadHash (and approval.approvedPayloadHash) unchanged
+      ctx.snapshot = { ...ctx.snapshot, payloadHash: 'tampered-snapshot-payload-hash' };
+      const result = services.gate.canExecuteSubmission(ctx);
+      expect(result.allowed).toBe(false);
+      expect(result.blockedBy.some((b) => b.includes('CHECK_15b_FAILED'))).toBe(true);
+    });
+
+    it('allows when snapshot payloadHash matches current hash', async () => {
+      const services = makeGateServices();
+      const ctx = await makeValidGateContext(services);
+      // Verify the happy path — snapshot.payloadHash === currentPayloadHash
+      expect(ctx.snapshot.payloadHash).toBe(ctx.currentPayloadHash);
+      const result = services.gate.canExecuteSubmission(ctx);
+      expect(result.allowed).toBe(true);
+    });
+  });
+
+  describe('blocks when request template changes after approval (Check 17)', () => {
+    it('blocks when current template hash differs from approved template hash', async () => {
+      const services = makeGateServices();
+      const ctx = await makeValidGateContext(services);
+      ctx.approval = makeTestApproval(ctx.currentPayloadHash, {
+        approvedTemplateHash: 'original-template-hash-v1',
+      });
+      ctx.currentTemplateHash = 'changed-template-hash-v2';
+      const result = services.gate.canExecuteSubmission(ctx);
+      expect(result.allowed).toBe(false);
+      expect(result.blockedBy.some((b) => b.includes('CHECK_17_FAILED'))).toBe(true);
+    });
+  });
+
+  describe('blocks when resubmission not acknowledged (Check 32)', () => {
+    it('blocks when resubmission flag is set but not acknowledged by operator', async () => {
+      const services = makeGateServices();
+      const ctx = await makeValidGateContext(services);
+      ctx.isResubmission = true;
+      ctx.resubmissionAcknowledged = false;
+      const result = services.gate.canExecuteSubmission(ctx);
+      expect(result.allowed).toBe(false);
+      expect(result.blockedBy.some((b) => b.includes('CHECK_32_FAILED'))).toBe(true);
+    });
+
+    it('allows when resubmission is acknowledged', async () => {
+      const services = makeGateServices();
+      const ctx = await makeValidGateContext(services);
+      ctx.isResubmission = true;
+      ctx.resubmissionAcknowledged = true;
+      const result = services.gate.canExecuteSubmission(ctx);
+      expect(result.allowed).toBe(true);
+    });
+  });
+
   describe('audit trail', () => {
     it('writes audit log on both allowed and blocked results', async () => {
       const services = makeGateServices();

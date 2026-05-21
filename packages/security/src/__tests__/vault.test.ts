@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { makeVault, makeKms } from './fixtures.js';
+import { makeVault } from './fixtures.js';
 import type { VaultActor } from '../vault/identity-vault.service.js';
 
 const OPERATOR_ACTOR: VaultActor = { actorId: 'op_001', actorType: 'OPERATOR' };

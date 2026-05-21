@@ -18,7 +18,8 @@
     "prisma:validate": "prisma validate",
     "prisma:migrate": "prisma migrate dev",
     "typecheck": "tsc --noEmit",
-    "build": "tsc"
+    "build": "tsc",
+    "lint": "eslint src"
   },
   "dependencies": {
     "@prisma/client": "^5.16.0"

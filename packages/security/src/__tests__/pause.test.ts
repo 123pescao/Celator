@@ -109,6 +109,31 @@ describe('EmergencyPauseService', () => {
     });
   });
 
+  describe('GLOBAL pause dual-admin warning (Phase 0 scaffold)', () => {
+    it('resolving a GLOBAL pause without second admin writes a warning audit log entry', () => {
+      const svc = new EmergencyPauseService();
+      const { pause } = svc.triggerPause('GLOBAL', undefined, LONG_REASON, ADMIN_ACTOR);
+      // secondAdminApprovedBy is not set — single admin resolves
+      svc.resolvePause(pause.id, LONG_RESOLUTION, ADMIN_ACTOR);
+      const logs = svc.getAuditLog();
+      expect(
+        logs.some((l) => l.eventType === 'EMERGENCY_PAUSE_DUAL_ADMIN_WARNING'),
+      ).toBe(true);
+    });
+
+    it('resolved GLOBAL pause requiresDualAdmin flag is set to true', () => {
+      const svc = new EmergencyPauseService();
+      const { pause } = svc.triggerPause('GLOBAL', undefined, LONG_REASON, ADMIN_ACTOR);
+      expect(pause.requiresDualAdmin).toBe(true);
+    });
+
+    it('non-GLOBAL pauses do not set requiresDualAdmin', () => {
+      const svc = new EmergencyPauseService();
+      const { pause } = svc.triggerPause('CLIENT', 'client_001', LONG_REASON, ADMIN_ACTOR);
+      expect(pause.requiresDualAdmin).toBe(false);
+    });
+  });
+
   describe('listActivePauses', () => {
     it('lists only active pauses', () => {
       const svc = new EmergencyPauseService();

@@ -14,3 +14,10 @@ Thumbs.db
 # Prisma
 prisma/migrations/
 generated/
+# Keys and certificates — never commit private key material
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer

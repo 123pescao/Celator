@@ -120,7 +120,8 @@ export function makeTestApproval(payloadHash: string, overrides?: Partial<GateAp
     operatorOrganizationId: TEST_ORG_ID,
     mfaFreshAt: mfaAt,
     sessionApprovalCount: 3,
-    reviewStartedAt: new Date(now.getTime() - 3 * 60 * 1000),
+    // 6 minutes covers the HIGH-risk minimum review time of 300s (5 minutes)
+    reviewStartedAt: new Date(now.getTime() - 6 * 60 * 1000),
     approvedAt: now,
     approvedPayloadHash: payloadHash,
     ...overrides,
@@ -155,7 +156,7 @@ export function makeTestSnapshot(
 export async function makeValidGateContext(
   services: ReturnType<typeof makeGateServices>,
 ): Promise<GateContext> {
-  const { snapshots, consent } = services;
+  const { snapshots } = services;
 
   const payload = {
     taskId: TEST_TASK_ID,

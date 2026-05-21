@@ -48,6 +48,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc",
+    "lint": "eslint src",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage"
   },

@@ -304,7 +304,6 @@ model Client {
   vaultRecords          IdentityVaultRecord[]
   cleanupCases          CleanupCase[]
   highRiskFlags         HighRiskFlag[]
-  pauseEvents           EmergencyPauseEvent[]
   auditLogs             AuditLog[]                 @relation("AuditClient")
   portalEvents          ClientPortalEvent[]
   dataDeletionRequests  ClientDataDeletionRequest[]
@@ -656,7 +655,8 @@ model EmergencyPauseEvent {
   secondAdminApprovedAt DateTime?
 
   triggerer User  @relation(fields: [triggeredBy], references: [id])
-  client    Client? @relation(fields: [scopeRef], references: [id], map: "emergency_pause_client_fk")
+  // scopeRef is polymorphic: holds a clientId, operatorId, broker ref, or jurisdiction string
+  // depending on scope. No FK constraint — polymorphic fields cannot reference a single table.
 
   @@index([status, scope])
   @@index([scopeRef, status])
