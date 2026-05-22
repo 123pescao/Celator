@@ -5,6 +5,8 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import type { AppServices } from '../../services-factory.js';
+import type { UserRepository } from '@celator/db';
+import { requireDevActor } from '../../auth/index.js';
 
 const CreateVersionBody = z.object({
   version: z.string().regex(/^\d+\.\d+\.\d+$/),
@@ -28,11 +30,13 @@ const RevokeAuthBody = z.object({
   caseId: z.string().optional(),
 });
 
-export const consentRoutes: FastifyPluginAsync<{ services: AppServices }> = async (fastify, opts) => {
+export const consentRoutes: FastifyPluginAsync<{ services: AppServices; userRepo: UserRepository }> = async (fastify, opts) => {
   const { consentService } = opts.services;
+  const { userRepo } = opts;
 
   fastify.post('/consent-versions', async (request, reply) => {
-    const actorId = (request.headers['x-dev-actor-id'] as string) ?? 'dev-actor';
+    const ctx = await requireDevActor(request, reply, userRepo);
+    if (!ctx) return;
     const body = CreateVersionBody.safeParse(request.body);
     if (!body.success) {
       return reply.code(400).send({ ok: false, error: 'VALIDATION_ERROR', details: body.error.flatten() });
@@ -42,14 +46,15 @@ export const consentRoutes: FastifyPluginAsync<{ services: AppServices }> = asyn
       body.data.documentHash,
       new Date(body.data.effectiveFrom),
       body.data.effectiveUntil ? new Date(body.data.effectiveUntil) : undefined,
-      actorId,
+      ctx.actor.id,
     );
     if (!result.ok) return reply.code(400).send({ ok: false, error: result.error, message: result.message });
     return reply.code(201).send({ ok: true, consentVersion: result.value });
   });
 
   fastify.post('/authorizations', async (request, reply) => {
-    const actorId = (request.headers['x-dev-actor-id'] as string) ?? 'dev-actor';
+    const ctx = await requireDevActor(request, reply, userRepo);
+    if (!ctx) return;
     const body = CreateAuthBody.safeParse(request.body);
     if (!body.success) {
       return reply.code(400).send({ ok: false, error: 'VALIDATION_ERROR', details: body.error.flatten() });
@@ -62,7 +67,7 @@ export const consentRoutes: FastifyPluginAsync<{ services: AppServices }> = asyn
         ...(expiresAtStr !== undefined ? { expiresAt: new Date(expiresAtStr) } : {}),
         ...(authorizationType !== undefined ? { authorizationType } : {}),
       },
-      actorId,
+      ctx.actor.id,
     );
     if (!result.ok) return reply.code(400).send({ ok: false, error: result.error, message: result.message });
     return reply.code(201).send({ ok: true, authorization: result.value });
@@ -76,12 +81,13 @@ export const consentRoutes: FastifyPluginAsync<{ services: AppServices }> = asyn
 
   fastify.post('/authorizations/:id/revoke', async (request, reply) => {
     const { id } = request.params as { id: string };
-    const actorId = (request.headers['x-dev-actor-id'] as string) ?? 'dev-actor';
+    const ctx = await requireDevActor(request, reply, userRepo);
+    if (!ctx) return;
     const body = RevokeAuthBody.safeParse(request.body);
     if (!body.success) {
       return reply.code(400).send({ ok: false, error: 'VALIDATION_ERROR', details: body.error.flatten() });
     }
-    const result = await consentService.revokeAuthorization(id, body.data.reason, actorId, body.data.caseId);
+    const result = await consentService.revokeAuthorization(id, body.data.reason, ctx.actor.id, body.data.caseId);
     if (!result.ok) return reply.code(400).send({ ok: false, error: result.error, message: result.message });
     return reply.send({ ok: true, authorization: result.value });
   });

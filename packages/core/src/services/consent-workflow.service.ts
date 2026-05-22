@@ -43,7 +43,7 @@ export class ConsentWorkflowService {
       effectiveUntil: effectiveUntil ?? null,
     });
 
-    await this.audit.write({
+    const auditResult = await this.audit.write({
       eventType: 'CONSENT_VERSION_CREATED',
       actorId: createdBy,
       actorType: 'ADMIN',
@@ -52,6 +52,7 @@ export class ConsentWorkflowService {
       outcome: 'ALLOWED',
       metadata: { version, documentHash },
     });
+    if (!auditResult.ok) return auditResult;
 
     return ok(record);
   }
@@ -75,7 +76,7 @@ export class ConsentWorkflowService {
       authorizationType: input.authorizationType ?? 'SELF',
     });
 
-    await this.audit.write({
+    const auditResult = await this.audit.write({
       eventType: 'AUTHORIZATION_CREATED',
       actorId,
       actorType: 'OPERATOR',
@@ -85,6 +86,7 @@ export class ConsentWorkflowService {
       outcome: 'ALLOWED',
       metadata: { scopeNames: input.scopeNames, jurisdiction: input.jurisdiction },
     });
+    if (!auditResult.ok) return auditResult;
 
     return ok(auth);
   }
@@ -101,7 +103,7 @@ export class ConsentWorkflowService {
 
     const revoked = await this.authorizationRepo.revoke(authorizationId, reason, new Date());
 
-    await this.audit.write({
+    const auditResult = await this.audit.write({
       eventType: 'AUTHORIZATION_REVOKED',
       actorId,
       actorType: 'OPERATOR',
@@ -111,6 +113,7 @@ export class ConsentWorkflowService {
       outcome: 'ALLOWED',
       metadata: { reason },
     });
+    if (!auditResult.ok) return auditResult;
 
     // Pause any active tasks in cases linked to this authorization
     if (caseId) {

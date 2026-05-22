@@ -38,26 +38,26 @@ export class CleanupTaskService {
       status: 'FOUND',
     });
 
-    await Promise.all([
-      this.audit.write({
-        eventType: 'TASK_CREATED',
-        actorId,
-        actorType: 'OPERATOR',
-        clientId,
-        resourceId: task.id,
-        resourceType: 'CleanupTask',
-        outcome: 'ALLOWED',
-        metadata: { sourceRef: input.sourceRef, riskTier: input.riskTier },
-      }),
-      this.timeline.append({
-        caseId: input.caseId,
-        taskId: task.id,
-        eventType: 'TASK_CREATED',
-        toStatus: 'FOUND',
-        actorId,
-        actorType: 'OPERATOR',
-      }),
-    ]);
+    const auditResult = await this.audit.write({
+      eventType: 'TASK_CREATED',
+      actorId,
+      actorType: 'OPERATOR',
+      clientId,
+      resourceId: task.id,
+      resourceType: 'CleanupTask',
+      outcome: 'ALLOWED',
+      metadata: { sourceRef: input.sourceRef, riskTier: input.riskTier },
+    });
+    if (!auditResult.ok) return auditResult;
+
+    await this.timeline.append({
+      caseId: input.caseId,
+      taskId: task.id,
+      eventType: 'TASK_CREATED',
+      toStatus: 'FOUND',
+      actorId,
+      actorType: 'OPERATOR',
+    });
 
     return ok(task);
   }
@@ -84,6 +84,7 @@ export class CleanupTaskService {
 
     const allowed = this.statusService.isTransitionAllowed(task.status, toStatus);
     if (!allowed) {
+      // BLOCKED audit — not fail-closed; transition is already denied
       await this.audit.write({
         eventType: 'TASK_TRANSITION_BLOCKED',
         actorId,
@@ -100,28 +101,28 @@ export class CleanupTaskService {
 
     const updated = await this.repo.updateStatus(taskId, toStatus);
 
-    await Promise.all([
-      this.audit.write({
-        eventType: 'TASK_STATUS_CHANGED',
-        actorId,
-        actorType: 'OPERATOR',
-        clientId,
-        resourceId: taskId,
-        resourceType: 'CleanupTask',
-        outcome: 'ALLOWED',
-        metadata: { fromStatus: task.status, toStatus, note },
-      }),
-      this.timeline.append({
-        caseId: task.caseId,
-        taskId,
-        eventType: 'TASK_STATUS_CHANGED',
-        fromStatus: task.status,
-        toStatus,
-        actorId,
-        actorType: 'OPERATOR',
-        ...(note !== undefined ? { note } : {}),
-      }),
-    ]);
+    const auditResult = await this.audit.write({
+      eventType: 'TASK_STATUS_CHANGED',
+      actorId,
+      actorType: 'OPERATOR',
+      clientId,
+      resourceId: taskId,
+      resourceType: 'CleanupTask',
+      outcome: 'ALLOWED',
+      metadata: { fromStatus: task.status, toStatus, note },
+    });
+    if (!auditResult.ok) return auditResult;
+
+    await this.timeline.append({
+      caseId: task.caseId,
+      taskId,
+      eventType: 'TASK_STATUS_CHANGED',
+      fromStatus: task.status,
+      toStatus,
+      actorId,
+      actorType: 'OPERATOR',
+      ...(note !== undefined ? { note } : {}),
+    });
 
     return ok(updated);
   }

@@ -5,6 +5,8 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import type { AppServices } from '../../services-factory.js';
+import type { UserRepository } from '@celator/db';
+import { requireDevActor } from '../../auth/index.js';
 
 const CreateCaseBody = z.object({
   clientId: z.string().min(1),
@@ -29,18 +31,20 @@ const TransitionTaskBody = z.object({
   note: z.string().optional(),
 });
 
-export const caseRoutes: FastifyPluginAsync<{ services: AppServices }> = async (fastify, opts) => {
+export const caseRoutes: FastifyPluginAsync<{ services: AppServices; userRepo: UserRepository }> = async (fastify, opts) => {
   const { caseService, taskService, timeline } = opts.services;
+  const { userRepo } = opts;
 
   // Cases
   fastify.post('/cases', async (request, reply) => {
-    const actorId = (request.headers['x-dev-actor-id'] as string) ?? 'dev-actor';
+    const ctx = await requireDevActor(request, reply, userRepo);
+    if (!ctx) return;
     const body = CreateCaseBody.safeParse(request.body);
     if (!body.success) {
       return reply.code(400).send({ ok: false, error: 'VALIDATION_ERROR', details: body.error.flatten() });
     }
     const { title, ...rest } = body.data;
-    const result = await caseService.create({ ...rest, ...(title !== undefined ? { title } : {}) }, actorId);
+    const result = await caseService.create({ ...rest, ...(title !== undefined ? { title } : {}) }, ctx.actor.id);
     if (!result.ok) return reply.code(400).send({ ok: false, error: result.error, message: result.message });
     return reply.code(201).send({ ok: true, case: result.value });
   });
@@ -61,21 +65,23 @@ export const caseRoutes: FastifyPluginAsync<{ services: AppServices }> = async (
 
   fastify.post('/cases/:id/close', async (request, reply) => {
     const { id } = request.params as { id: string };
-    const actorId = (request.headers['x-dev-actor-id'] as string) ?? 'dev-actor';
-    const result = await caseService.close(id, actorId);
+    const ctx = await requireDevActor(request, reply, userRepo);
+    if (!ctx) return;
+    const result = await caseService.close(id, ctx.actor.id);
     if (!result.ok) return reply.code(400).send({ ok: false, error: result.error, message: result.message });
     return reply.send({ ok: true, case: result.value });
   });
 
   // Tasks
   fastify.post('/tasks', async (request, reply) => {
-    const actorId = (request.headers['x-dev-actor-id'] as string) ?? 'dev-actor';
+    const ctx = await requireDevActor(request, reply, userRepo);
+    if (!ctx) return;
     const body = CreateTaskBody.safeParse(request.body);
     if (!body.success) {
       return reply.code(400).send({ ok: false, error: 'VALIDATION_ERROR', details: body.error.flatten() });
     }
     const { clientId, ...taskInput } = body.data;
-    const result = await taskService.create(taskInput as Parameters<typeof taskService.create>[0], clientId, actorId);
+    const result = await taskService.create(taskInput as Parameters<typeof taskService.create>[0], clientId, ctx.actor.id);
     if (!result.ok) return reply.code(400).send({ ok: false, error: result.error, message: result.message });
     return reply.code(201).send({ ok: true, task: result.value });
   });
@@ -95,7 +101,8 @@ export const caseRoutes: FastifyPluginAsync<{ services: AppServices }> = async (
 
   fastify.post('/tasks/:id/transition', async (request, reply) => {
     const { id } = request.params as { id: string };
-    const actorId = (request.headers['x-dev-actor-id'] as string) ?? 'dev-actor';
+    const ctx = await requireDevActor(request, reply, userRepo);
+    if (!ctx) return;
     const body = TransitionTaskBody.safeParse(request.body);
     if (!body.success) {
       return reply.code(400).send({ ok: false, error: 'VALIDATION_ERROR', details: body.error.flatten() });
@@ -104,7 +111,7 @@ export const caseRoutes: FastifyPluginAsync<{ services: AppServices }> = async (
       id,
       body.data.toStatus as Parameters<typeof taskService.transition>[1],
       body.data.clientId,
-      actorId,
+      ctx.actor.id,
       body.data.note,
     );
     if (!result.ok) return reply.code(400).send({ ok: false, error: result.error, message: result.message });

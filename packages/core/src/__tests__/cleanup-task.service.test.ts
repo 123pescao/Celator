@@ -113,4 +113,36 @@ describe('CleanupTaskService', () => {
       expect(transitions).toContain('CLASSIFIED');
     });
   });
+
+  describe('audit fail-close', () => {
+    const AUDIT_ERR = { ok: false as const, error: 'AUDIT_LOG_FAILED' as const, message: 'DB down' };
+
+    it('create propagates audit failure', async () => {
+      const audit = makeAudit();
+      vi.mocked(audit.write).mockResolvedValueOnce(AUDIT_ERR);
+      const svc2 = new CleanupTaskService(repo, audit, makeTimeline());
+      const result = await svc2.create({ caseId: 'case_001' }, 'client_001', 'op_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('AUDIT_LOG_FAILED');
+    });
+
+    it('transition (ALLOWED) propagates audit failure', async () => {
+      const audit = makeAudit();
+      vi.mocked(audit.write).mockResolvedValueOnce(AUDIT_ERR);
+      const svc2 = new CleanupTaskService(repo, audit, makeTimeline());
+      const result = await svc2.transition('task_001', 'CLASSIFIED', 'client_001', 'op_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('AUDIT_LOG_FAILED');
+    });
+
+    it('transition (BLOCKED) still returns TRANSITION_NOT_ALLOWED despite audit failure', async () => {
+      const audit = makeAudit();
+      vi.mocked(audit.write).mockResolvedValueOnce(AUDIT_ERR);
+      const svc2 = new CleanupTaskService(repo, audit, makeTimeline());
+      const result = await svc2.transition('task_001', 'SUBMITTED', 'client_001', 'op_001');
+      // BLOCKED transition: audit is best-effort; policy decision is authoritative
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('TRANSITION_NOT_ALLOWED');
+    });
+  });
 });

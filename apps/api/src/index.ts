@@ -69,12 +69,12 @@ async function start(): Promise<void> {
   await fastify.register(healthRoutes);
   await fastify.register(securityStatusRoutes);
 
-  // Phase 1A/1B — developer testing endpoints (prefix /api/v1)
+  // Phase 1A/1B/1C — developer testing endpoints (prefix /api/v1)
   await fastify.register(adminRoutes, { prefix: '/api/v1', repos });
-  await fastify.register(clientRoutes, { prefix: '/api/v1', services });
-  await fastify.register(caseRoutes, { prefix: '/api/v1', services });
-  await fastify.register(reviewPacketRoutes, { prefix: '/api/v1', services });
-  await fastify.register(consentRoutes, { prefix: '/api/v1', services });
+  await fastify.register(clientRoutes, { prefix: '/api/v1', services, userRepo: repos.userRepo });
+  await fastify.register(caseRoutes, { prefix: '/api/v1', services, userRepo: repos.userRepo });
+  await fastify.register(reviewPacketRoutes, { prefix: '/api/v1', services, userRepo: repos.userRepo });
+  await fastify.register(consentRoutes, { prefix: '/api/v1', services, userRepo: repos.userRepo });
 
   // Global error handler — never expose stack traces in responses
   fastify.setErrorHandler((error, request, reply) => {

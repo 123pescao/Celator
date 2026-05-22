@@ -26,23 +26,23 @@ export class CleanupCaseService {
       title: input.title ?? null,
     });
 
-    await Promise.all([
-      this.audit.write({
-        eventType: 'CASE_CREATED',
-        actorId,
-        actorType: 'OPERATOR',
-        clientId: input.clientId,
-        resourceId: cleanupCase.id,
-        resourceType: 'CleanupCase',
-        outcome: 'ALLOWED',
-      }),
-      this.timeline.append({
-        caseId: cleanupCase.id,
-        eventType: 'CASE_CREATED',
-        actorId,
-        actorType: 'OPERATOR',
-      }),
-    ]);
+    const auditResult = await this.audit.write({
+      eventType: 'CASE_CREATED',
+      actorId,
+      actorType: 'OPERATOR',
+      clientId: input.clientId,
+      resourceId: cleanupCase.id,
+      resourceType: 'CleanupCase',
+      outcome: 'ALLOWED',
+    });
+    if (!auditResult.ok) return auditResult;
+
+    await this.timeline.append({
+      caseId: cleanupCase.id,
+      eventType: 'CASE_CREATED',
+      actorId,
+      actorType: 'OPERATOR',
+    });
 
     return ok(cleanupCase);
   }
@@ -64,23 +64,23 @@ export class CleanupCaseService {
 
     const closed = await this.repo.close(caseId, new Date());
 
-    await Promise.all([
-      this.audit.write({
-        eventType: 'CASE_CLOSED',
-        actorId,
-        actorType: 'OPERATOR',
-        clientId: existing.clientId,
-        resourceId: caseId,
-        resourceType: 'CleanupCase',
-        outcome: 'ALLOWED',
-      }),
-      this.timeline.append({
-        caseId,
-        eventType: 'CASE_CLOSED',
-        actorId,
-        actorType: 'OPERATOR',
-      }),
-    ]);
+    const auditResult = await this.audit.write({
+      eventType: 'CASE_CLOSED',
+      actorId,
+      actorType: 'OPERATOR',
+      clientId: existing.clientId,
+      resourceId: caseId,
+      resourceType: 'CleanupCase',
+      outcome: 'ALLOWED',
+    });
+    if (!auditResult.ok) return auditResult;
+
+    await this.timeline.append({
+      caseId,
+      eventType: 'CASE_CLOSED',
+      actorId,
+      actorType: 'OPERATOR',
+    });
 
     return ok(closed);
   }

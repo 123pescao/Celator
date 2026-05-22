@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Celator Phase 1A — API Workflow Smoke Test
+# Celator Phase 1A/1C — API Workflow Smoke Test
 #
 # Exercises the full operator workflow against a running local API:
-#   health → security/status → org → user → client → identity verification
-#   → consent → authorization → case → task → review packet → approval
-#   → timeline → audit logs
+#   health → security/status → org → user → actor-validation → client
+#   → identity verification → consent → authorization → case → task
+#   → review packet → approval → timeline (assert > 0) → audit logs (assert > 0)
 #
-# All test data uses a timestamped prefix and is identified as synthetic.
+# Phase 1C: all write requests carry X-Dev-Actor-Id set to the real USER_ID
+# created in step 4. Actor validation steps assert 401/403 for missing/invalid.
+#
 # No real PII. No real external submissions.
 #
 # Usage:
@@ -16,7 +18,7 @@
 # Requirements:
 #   - API running (pnpm dev)
 #   - curl
-#   - jq (optional — degrades gracefully to raw output)
+#   - jq or node (optional — degrades to grep counting)
 #
 # Exit codes:
 #   0  All required steps passed
@@ -37,7 +39,9 @@ done
 FAILURES=0
 STEP=0
 JQ_AVAILABLE=false
+NODE_AVAILABLE=false
 if command -v jq &>/dev/null; then JQ_AVAILABLE=true; fi
+if command -v node &>/dev/null; then NODE_AVAILABLE=true; fi
 
 pass()   { echo "  ✓  $*"; }
 fail()   { echo "  ✗  $*" >&2; FAILURES=$((FAILURES + 1)); }
@@ -48,12 +52,16 @@ TS=$(date +%s)
 RAND=$(tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c5 || echo "xxxxx")
 SUFFIX="smoke_${TS}_${RAND}"
 
-pretty_json() {
-  if $JQ_AVAILABLE; then jq .; else cat; fi
-}
+# Actor ID — empty until user is created in step 4; then set to the real USER_ID.
+# All api_call() invocations after step 4 inherit this automatically.
+ACTOR_ID=""
 
-# Call an endpoint and extract a JSON field via jq or grep fallback
-# Usage: extract_field <json_string> <jq_path> <grep_fallback_key>
+# Entity IDs — pre-initialized to prevent unbound-variable exits when upstream steps fail.
+ORG_ID="" USER_ID="" CLIENT_ID="" VERIFICATION_ID="" CONSENT_VERSION_ID=""
+AUTHORIZATION_ID="" CASE_ID="" TASK_ID="" APPROVAL_REQUEST_ID=""
+
+# Extract a field from a JSON string.
+# Usage: extract_field <json> <jq_path> <grep_key>
 extract_field() {
   local json="$1" path="$2" key="$3"
   if $JQ_AVAILABLE; then
@@ -63,20 +71,44 @@ extract_field() {
   fi
 }
 
-# POST or GET, return body; set LAST_CODE to HTTP status code
+# Count elements in a JSON array field.
+# Uses jq → node → grep fallback.
+# Usage: count_array <json> <field_name>
+count_array() {
+  local json="$1" key="$2"
+  if $JQ_AVAILABLE; then
+    echo "$json" | jq ".${key} | length" 2>/dev/null || echo "0"
+  elif $NODE_AVAILABLE; then
+    echo "$json" | node -e \
+      "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));process.stdout.write(String((d['${key}']||[]).length));"
+  else
+    # Rough fallback: count objects in the field by counting opening braces
+    echo "$json" | grep -o '"id"' | wc -l | tr -d ' '
+  fi
+}
+
+# POST/PATCH/GET; auto-includes X-Dev-Actor-Id if ACTOR_ID is set.
+# Can override actor per-call with 4th arg; pass "__none__" to omit entirely.
+# Usage: api_call <METHOD> <PATH> [<json_data>] [<actor_override>]
 LAST_CODE=""
 LAST_BODY=""
 api_call() {
-  local method="$1" path="$2" data="${3:-}"
+  local method="$1" path="$2" data="${3:-}" actor="${4:-${ACTOR_ID}}"
   local url="${API_URL}${path}"
   local tmpfile
   tmpfile=$(mktemp)
 
+  local actor_args=()
+  if [[ "$actor" != "__none__" && -n "$actor" ]]; then
+    actor_args=(-H "X-Dev-Actor-Id: ${actor}")
+  fi
+
   if [[ "$method" == "GET" ]]; then
-    LAST_CODE=$(curl -s -o "$tmpfile" -w "%{http_code}" --max-time 10 --connect-timeout 5 "$url" 2>/dev/null || echo "000")
+    LAST_CODE=$(curl -s -o "$tmpfile" -w "%{http_code}" --max-time 10 --connect-timeout 5 \
+      "${actor_args[@]}" "$url" 2>/dev/null || echo "000")
   else
     LAST_CODE=$(curl -s -o "$tmpfile" -w "%{http_code}" --max-time 10 --connect-timeout 5 \
-      -X "$method" -H "Content-Type: application/json" -H "X-Dev-Actor-Id: smoke-actor" \
+      -X "$method" -H "Content-Type: application/json" "${actor_args[@]}" \
       -d "$data" "$url" 2>/dev/null || echo "000")
   fi
   LAST_BODY=$(cat "$tmpfile" 2>/dev/null || echo "{}")
@@ -125,9 +157,9 @@ if require_ok "GET /security/status" "200"; then
   fi
 fi
 
-# ── Step 3: Create organization ────────────────────────────────────────────────
+# ── Step 3: Create organization (DEV_BOOTSTRAP — no actor required) ────────────
 header "POST /api/v1/organizations"
-api_call POST /api/v1/organizations "{\"name\":\"${SUFFIX}_org\"}"
+api_call POST /api/v1/organizations "{\"name\":\"${SUFFIX}_org\"}" "__none__"
 if require_ok "POST /api/v1/organizations" "201"; then
   ORG_ID=$(extract_field "$LAST_BODY" ".organization.id" "id")
   if [[ -n "$ORG_ID" && "$ORG_ID" != "null" ]]; then
@@ -139,20 +171,55 @@ if require_ok "POST /api/v1/organizations" "201"; then
   fi
 fi
 
-# ── Step 4: Create operator user ───────────────────────────────────────────────
+# ── Step 4: Create operator user (DEV_BOOTSTRAP — no actor required) ───────────
 header "POST /api/v1/users"
-api_call POST /api/v1/users "{\"organizationId\":\"${ORG_ID}\",\"email\":\"${SUFFIX}@smoke.invalid\",\"displayName\":\"Smoke Operator ${SUFFIX}\"}"
+api_call POST /api/v1/users \
+  "{\"organizationId\":\"${ORG_ID}\",\"email\":\"${SUFFIX}@smoke.invalid\",\"displayName\":\"Smoke Operator ${SUFFIX}\"}" \
+  "__none__"
 if require_ok "POST /api/v1/users" "201"; then
   USER_ID=$(extract_field "$LAST_BODY" ".user.id" "id")
   if [[ -n "$USER_ID" && "$USER_ID" != "null" ]]; then
     pass "user created: ${USER_ID}"
+    ACTOR_ID="$USER_ID"  # All subsequent write requests use this actor
   else
     fail "user: could not extract id"
     echo "$LAST_BODY"
   fi
 fi
 
-# ── Step 5: Create client ──────────────────────────────────────────────────────
+# ── Step 5: Actor validation — missing header returns 401 ──────────────────────
+header "Actor validation: missing X-Dev-Actor-Id → 401"
+api_call POST /api/v1/clients \
+  "{\"organizationId\":\"${ORG_ID}\",\"displayName\":\"should-fail\"}" \
+  "__none__"
+if [[ "$LAST_CODE" == "401" ]]; then
+  pass "missing actor header: HTTP 401"
+  if echo "$LAST_BODY" | grep -q '"ACTOR_REQUIRED"'; then
+    pass "error code is ACTOR_REQUIRED"
+  else
+    fail "error code is not ACTOR_REQUIRED (got: ${LAST_BODY})"
+  fi
+else
+  fail "missing actor header: expected 401, got ${LAST_CODE}"
+fi
+
+# ── Step 6: Actor validation — invalid (non-existent) user ID → 401 ───────────
+header "Actor validation: invalid X-Dev-Actor-Id → 401"
+api_call POST /api/v1/clients \
+  "{\"organizationId\":\"${ORG_ID}\",\"displayName\":\"should-fail\"}" \
+  "nonexistent-user-id-xxxxxxxxxxx"
+if [[ "$LAST_CODE" == "401" ]]; then
+  pass "invalid actor id: HTTP 401"
+  if echo "$LAST_BODY" | grep -q '"ACTOR_INVALID"'; then
+    pass "error code is ACTOR_INVALID"
+  else
+    fail "error code is not ACTOR_INVALID (got: ${LAST_BODY})"
+  fi
+else
+  fail "invalid actor id: expected 401, got ${LAST_CODE}"
+fi
+
+# ── Step 7: Create client ──────────────────────────────────────────────────────
 header "POST /api/v1/clients"
 api_call POST /api/v1/clients "{\"organizationId\":\"${ORG_ID}\",\"displayName\":\"${SUFFIX}_client\"}"
 if require_ok "POST /api/v1/clients" "201"; then
@@ -170,7 +237,7 @@ if require_ok "POST /api/v1/clients" "201"; then
   fi
 fi
 
-# ── Step 6: Create identity verification record ────────────────────────────────
+# ── Step 8: Create identity verification record ────────────────────────────────
 header "POST /api/v1/clients/:clientId/identity-verification"
 api_call POST "/api/v1/clients/${CLIENT_ID}/identity-verification" "{}"
 if require_ok "POST /api/v1/clients/:id/identity-verification" "201"; then
@@ -183,16 +250,17 @@ if require_ok "POST /api/v1/clients/:id/identity-verification" "201"; then
   fi
 fi
 
-# ── Step 7: Attest the verification ───────────────────────────────────────────
+# ── Step 9: Attest the verification ───────────────────────────────────────────
 header "POST /api/v1/identity-verifications/:id/attest"
+# Phase 1C: operatorId comes from X-Dev-Actor-Id; not in body
 api_call POST "/api/v1/identity-verifications/${VERIFICATION_ID}/attest" \
-  "{\"operatorAttestation\":\"Smoke test: documents reviewed\",\"operatorId\":\"smoke-operator\"}"
+  "{\"operatorAttestation\":\"Smoke test: documents reviewed\"}"
 if require_ok "POST /api/v1/identity-verifications/:id/attest" "200"; then
   ATTEST_STATUS=$(extract_field "$LAST_BODY" ".verification.status" "status")
   pass "attestation recorded (status=${ATTEST_STATUS})"
 fi
 
-# ── Step 8: Complete verification → activates client ──────────────────────────
+# ── Step 10: Complete verification → activates client ─────────────────────────
 header "POST /api/v1/identity-verifications/:id/complete"
 api_call POST "/api/v1/identity-verifications/${VERIFICATION_ID}/complete" "{}"
 if require_ok "POST /api/v1/identity-verifications/:id/complete" "200"; then
@@ -204,7 +272,7 @@ if require_ok "POST /api/v1/identity-verifications/:id/complete" "200"; then
   fi
 fi
 
-# ── Step 9: Confirm client is now ACTIVE ──────────────────────────────────────
+# ── Step 11: Confirm client is now ACTIVE ─────────────────────────────────────
 header "GET /api/v1/clients/:id (confirm ACTIVE)"
 api_call GET "/api/v1/clients/${CLIENT_ID}"
 if require_ok "GET /api/v1/clients/:id" "200"; then
@@ -216,10 +284,13 @@ if require_ok "GET /api/v1/clients/:id" "200"; then
   fi
 fi
 
-# ── Step 10: Create consent version ───────────────────────────────────────────
+# ── Step 12: Create consent version ───────────────────────────────────────────
 header "POST /api/v1/consent-versions"
-CV_VERSION="999.${TS}.0"
-HASH=$(printf '%0.s0' {1..64})  # 64-char placeholder hash
+# Split timestamp across two segments to avoid a 10-digit sequence in the version string.
+# The phone-number PII pattern matches 10 consecutive digits; splitting avoids it.
+CV_VERSION="999.$(( TS / 100000 )).$(( TS % 100000 ))"
+# 64-char hex string using only letters — avoids triggering the digit-sequence PII filter
+HASH="abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
 api_call POST /api/v1/consent-versions \
   "{\"version\":\"${CV_VERSION}\",\"documentHash\":\"${HASH}\",\"effectiveFrom\":\"2026-01-01T00:00:00Z\"}"
 if require_ok "POST /api/v1/consent-versions" "201"; then
@@ -232,7 +303,7 @@ if require_ok "POST /api/v1/consent-versions" "201"; then
   fi
 fi
 
-# ── Step 11: Create client authorization ──────────────────────────────────────
+# ── Step 13: Create client authorization ──────────────────────────────────────
 header "POST /api/v1/authorizations"
 api_call POST /api/v1/authorizations \
   "{\"clientId\":\"${CLIENT_ID}\",\"consentVersionId\":\"${CONSENT_VERSION_ID}\",\"scopeNames\":[\"data_broker_opt_out\",\"people_search_removal\"],\"jurisdiction\":\"US-CA\",\"signedAt\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
@@ -246,7 +317,7 @@ if require_ok "POST /api/v1/authorizations" "201"; then
   fi
 fi
 
-# ── Step 12: Create cleanup case ──────────────────────────────────────────────
+# ── Step 14: Create cleanup case ──────────────────────────────────────────────
 header "POST /api/v1/cases"
 api_call POST /api/v1/cases \
   "{\"clientId\":\"${CLIENT_ID}\",\"authorizationId\":\"${AUTHORIZATION_ID}\",\"title\":\"${SUFFIX}_case\"}"
@@ -260,7 +331,7 @@ if require_ok "POST /api/v1/cases" "201"; then
   fi
 fi
 
-# ── Step 13: Create cleanup task ──────────────────────────────────────────────
+# ── Step 15: Create cleanup task ──────────────────────────────────────────────
 header "POST /api/v1/tasks"
 api_call POST /api/v1/tasks \
   "{\"caseId\":\"${CASE_ID}\",\"clientId\":\"${CLIENT_ID}\",\"sourceRef\":\"${SUFFIX}.databroker.invalid\",\"matchStatus\":\"CONFIRMED_MATCH\",\"riskTier\":\"STANDARD\",\"actionType\":\"OPT_OUT\"}"
@@ -274,7 +345,7 @@ if require_ok "POST /api/v1/tasks" "201"; then
   fi
 fi
 
-# ── Step 14: Create review packet ─────────────────────────────────────────────
+# ── Step 16: Create review packet ─────────────────────────────────────────────
 header "POST /api/v1/review-packets"
 api_call POST /api/v1/review-packets \
   "{\"taskId\":\"${TASK_ID}\",\"authorizationId\":\"${AUTHORIZATION_ID}\",\"clientId\":\"${CLIENT_ID}\",\"redactedPreview\":\"Smoke test record — synthetic data only, no real PII\"}"
@@ -288,11 +359,11 @@ if require_ok "POST /api/v1/review-packets" "201"; then
   fi
 fi
 
-# ── Step 15: Approve the request ──────────────────────────────────────────────
+# ── Step 17: Approve the request ──────────────────────────────────────────────
 header "POST /api/v1/approval-requests/:id/approve"
-# Use the real USER_ID created in step 4 — OperatorApproval requires a valid User FK
+# Phase 1C: operatorId and operatorOrganizationId come from X-Dev-Actor-Id; not in body
 api_call POST "/api/v1/approval-requests/${APPROVAL_REQUEST_ID}/approve" \
-  "{\"operatorId\":\"${USER_ID}\",\"operatorOrganizationId\":\"${ORG_ID}\",\"clientId\":\"${CLIENT_ID}\",\"mfaFreshAt\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"sessionApprovalCount\":0,\"notes\":\"Smoke test approval\"}"
+  "{\"clientId\":\"${CLIENT_ID}\",\"mfaFreshAt\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"sessionApprovalCount\":0,\"notes\":\"Smoke test approval\"}"
 if require_ok "POST /api/v1/approval-requests/:id/approve" "200"; then
   APPROVAL_DECISION=$(extract_field "$LAST_BODY" ".approval.decision" "decision")
   if [[ "$APPROVAL_DECISION" == "APPROVED" ]]; then
@@ -303,41 +374,44 @@ if require_ok "POST /api/v1/approval-requests/:id/approve" "200"; then
   fi
 fi
 
-# ── Step 16: Get case timeline ────────────────────────────────────────────────
+# ── Step 18: Get case timeline — assert at least 1 event ──────────────────────
 header "GET /api/v1/cases/:caseId/timeline"
 api_call GET "/api/v1/cases/${CASE_ID}/timeline"
 if require_ok "GET /api/v1/cases/:caseId/timeline" "200"; then
   if echo "$LAST_BODY" | grep -q '"ok":true'; then
-    EVENT_COUNT=0
-    if $JQ_AVAILABLE; then
-      EVENT_COUNT=$(echo "$LAST_BODY" | jq '.events | length' 2>/dev/null || echo "0")
+    EVENT_COUNT=$(count_array "$LAST_BODY" "events")
+    if [[ "${EVENT_COUNT:-0}" -gt 0 ]]; then
+      pass "timeline: ${EVENT_COUNT} events (> 0)"
+    else
+      fail "timeline: expected at least 1 event, got ${EVENT_COUNT:-0}"
     fi
-    pass "timeline retrieved (${EVENT_COUNT} events)"
   else
     fail "timeline: ok != true"
   fi
 fi
 
-# ── Step 17: Get client audit logs ────────────────────────────────────────────
+# ── Step 19: Get client audit logs — assert at least 1 log ────────────────────
 header "GET /api/v1/clients/:clientId/audit-logs"
 api_call GET "/api/v1/clients/${CLIENT_ID}/audit-logs"
 if require_ok "GET /api/v1/clients/:clientId/audit-logs" "200"; then
   if echo "$LAST_BODY" | grep -q '"ok":true'; then
-    LOG_COUNT=0
-    if $JQ_AVAILABLE; then
-      LOG_COUNT=$(echo "$LAST_BODY" | jq '.auditLogs | length' 2>/dev/null || echo "0")
+    LOG_COUNT=$(count_array "$LAST_BODY" "auditLogs")
+    if [[ "${LOG_COUNT:-0}" -gt 0 ]]; then
+      pass "audit logs: ${LOG_COUNT} records (> 0)"
+    else
+      fail "audit logs: expected at least 1 record, got ${LOG_COUNT:-0}"
     fi
-    pass "audit logs retrieved (${LOG_COUNT} records)"
-    # Verify no secrets or PII-like strings in the audit log response
     if echo "$LAST_BODY" | grep -qiE '"[^"]*password[^"]*":|"[^"]*secret[^"]*":'; then
       fail "audit logs: response appears to contain secret/password keys"
+    else
+      pass "audit logs: no secret/password keys in response"
     fi
   else
     fail "audit logs: ok != true"
   fi
 fi
 
-# ── Step 18: Validation — 400 on bad input ────────────────────────────────────
+# ── Step 20: Validation — 400 on bad input ────────────────────────────────────
 header "Validation: POST /api/v1/clients (bad body → 400)"
 api_call POST /api/v1/clients "{\"displayName\":\"missing-org-id\"}"
 if [[ "$LAST_CODE" == "400" ]]; then
@@ -351,7 +425,7 @@ else
   fail "bad input: expected 400, got ${LAST_CODE}"
 fi
 
-# ── Step 19: Not found returns 404 ────────────────────────────────────────────
+# ── Step 21: Not found returns 404 ────────────────────────────────────────────
 header "GET /api/v1/clients/nonexistent-id → 404"
 api_call GET /api/v1/clients/nonexistent-id-xxxxxxxxx
 if [[ "$LAST_CODE" == "404" ]]; then
@@ -360,7 +434,7 @@ else
   fail "nonexistent resource: expected 404, got ${LAST_CODE}"
 fi
 
-# ── Step 20: No stack traces in error responses ────────────────────────────────
+# ── Step 22: No stack traces in error responses ────────────────────────────────
 header "Error responses contain no stack traces"
 api_call POST /api/v1/clients "{}"
 if echo "$LAST_BODY" | grep -qi '"stack":\|"stacktrace":\|at Object\.\|at async'; then
@@ -374,10 +448,11 @@ echo
 echo "════════════════════════════════════════════════════════"
 echo "  Smoke test suffix: ${SUFFIX}"
 echo "  Test data org:     ${ORG_ID:-UNKNOWN}"
+echo "  Test data user:    ${USER_ID:-UNKNOWN}"
 echo "  Test data client:  ${CLIENT_ID:-UNKNOWN}"
 echo "════════════════════════════════════════════════════════"
 if [[ $FAILURES -eq 0 ]]; then
-  echo "  ALL SMOKE STEPS PASSED"
+  echo "  ALL SMOKE STEPS PASSED (22/22)"
   echo "════════════════════════════════════════════════════════"
   exit 0
 else

@@ -1,6 +1,7 @@
 /**
  * Developer-testing routes for Organization and User management.
- * NOT production auth — uses X-Dev-Actor-Id header.
+ * These are DEV_BOOTSTRAP endpoints — blocked in production.
+ * NOT production auth — no actor required for org/user creation.
  */
 
 import type { FastifyPluginAsync } from 'fastify';
@@ -20,6 +21,15 @@ const CreateUserBody = z.object({
 
 export const adminRoutes: FastifyPluginAsync<{ repos: AppRepos }> = async (fastify, opts) => {
   const { orgRepo, userRepo } = opts.repos;
+
+  // Guard: these endpoints exist only for dev/test bootstrap — never expose in production
+  fastify.addHook('onRequest', (_request, reply, done) => {
+    if (process.env['NODE_ENV'] === 'production') {
+      void reply.code(403).send({ ok: false, error: 'DEV_BOOTSTRAP_DISABLED', message: 'Bootstrap endpoints are disabled in production' });
+      return;
+    }
+    done();
+  });
 
   fastify.post('/organizations', async (request, reply) => {
     const body = CreateOrgBody.safeParse(request.body);
@@ -56,7 +66,6 @@ export const adminRoutes: FastifyPluginAsync<{ repos: AppRepos }> = async (fasti
       return reply.code(201).send({ ok: true, user });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      // Unique constraint on email
       if (msg.includes('Unique constraint') || msg.includes('unique')) {
         return reply.code(409).send({ ok: false, error: 'EMAIL_ALREADY_EXISTS', message: 'A user with this email already exists' });
       }

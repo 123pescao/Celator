@@ -157,4 +157,41 @@ describe('ConsentWorkflowService', () => {
       if (result.ok) expect(result.value.covered).toBe(false);
     });
   });
+
+  describe('audit fail-close', () => {
+    const AUDIT_ERR = { ok: false as const, error: 'AUDIT_LOG_FAILED' as const, message: 'DB down' };
+
+    it('createConsentVersion propagates audit failure', async () => {
+      const audit = makeAudit();
+      vi.mocked(audit.write).mockResolvedValueOnce(AUDIT_ERR);
+      const svc2 = new ConsentWorkflowService(versionRepo, authRepo, audit, () => makeTaskService());
+      const result = await svc2.createConsentVersion('2.0.0', 'b'.repeat(64), new Date(), undefined, 'admin_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('AUDIT_LOG_FAILED');
+    });
+
+    it('createAuthorization propagates audit failure', async () => {
+      const audit = makeAudit();
+      vi.mocked(audit.write).mockResolvedValueOnce(AUDIT_ERR);
+      const svc2 = new ConsentWorkflowService(versionRepo, authRepo, audit, () => makeTaskService());
+      const result = await svc2.createAuthorization({
+        clientId: 'client_001',
+        consentVersionId: 'cv_001',
+        scopeNames: ['X'],
+        jurisdiction: 'US-CA',
+        signedAt: new Date(),
+      }, 'op_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('AUDIT_LOG_FAILED');
+    });
+
+    it('revokeAuthorization propagates audit failure', async () => {
+      const audit = makeAudit();
+      vi.mocked(audit.write).mockResolvedValueOnce(AUDIT_ERR);
+      const svc2 = new ConsentWorkflowService(versionRepo, authRepo, audit, () => makeTaskService());
+      const result = await svc2.revokeAuthorization('auth_001', 'reason', 'op_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('AUDIT_LOG_FAILED');
+    });
+  });
 });

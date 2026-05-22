@@ -92,4 +92,29 @@ describe('ClientService', () => {
       expect(audit.write).toHaveBeenCalledWith(expect.objectContaining({ eventType: 'CLIENT_STATUS_CHANGED' }));
     });
   });
+
+  describe('audit fail-close', () => {
+    const AUDIT_ERR = { ok: false as const, error: 'AUDIT_LOG_FAILED' as const, message: 'DB down' };
+
+    it('create propagates audit failure', async () => {
+      vi.mocked(audit.write).mockResolvedValueOnce(AUDIT_ERR);
+      const result = await svc.create({ organizationId: 'org_001', displayName: 'Alice' }, 'op_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('AUDIT_LOG_FAILED');
+    });
+
+    it('activateAfterVerification propagates audit failure', async () => {
+      vi.mocked(audit.write).mockResolvedValueOnce(AUDIT_ERR);
+      const result = await svc.activateAfterVerification('client_001', 'op_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('AUDIT_LOG_FAILED');
+    });
+
+    it('updateStatus propagates audit failure', async () => {
+      vi.mocked(audit.write).mockResolvedValueOnce(AUDIT_ERR);
+      const result = await svc.updateStatus('client_001', 'SUSPENDED', 'op_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('AUDIT_LOG_FAILED');
+    });
+  });
 });

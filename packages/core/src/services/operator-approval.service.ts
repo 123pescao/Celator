@@ -86,7 +86,7 @@ export class OperatorApprovalService {
       await this.taskService.transition(request.taskId, 'ESCALATED', clientId, input.operatorId, input.notes);
     }
 
-    await this.audit.write({
+    const auditResult = await this.audit.write({
       eventType: 'OPERATOR_DECISION_RECORDED',
       actorId: input.operatorId,
       actorType: 'OPERATOR',
@@ -100,6 +100,7 @@ export class OperatorApprovalService {
         taskId: request.taskId,
       },
     });
+    if (!auditResult.ok) return auditResult;
 
     return ok(approval);
   }

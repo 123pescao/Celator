@@ -348,3 +348,16 @@ Requires a live DB. Run with `pnpm test:integration`.
 - Async HMAC signature verification: `canExecuteSubmission()` is synchronous; Phase 1A uses SHA-256 hash placeholder (`sha256:${payloadHash}`), full HMAC is Phase 1C
 - Audit log tamper protection: in-DB only, external write-once store is Phase 1C
 - DB-level triggers for status transitions: Phase 1C
+
+---
+
+## Phase 1C additions (2026-05-21)
+
+Phase 1C hardened actor resolution and audit reliability. See [PHASE_1C_ACTOR_AUDIT_HARDENING.md](PHASE_1C_ACTOR_AUDIT_HARDENING.md) for full details.
+
+**Summary of changes:**
+- `apps/api/src/auth/dev-actor-context.ts` — `requireDevActor()` replaces all `?? 'dev-actor'` fallbacks; DB-backed, fail-closed with 401/403
+- `admin.ts` — `DEV_BOOTSTRAP_DISABLED` guard blocks bootstrap endpoints in `NODE_ENV=production`
+- All 7 service files — audit fail-close: `AUDIT_LOG_FAILED` propagates up on ALLOWED-outcome write failures
+- Smoke script — 22 steps, real actor ID, actor validation steps, timeline/audit count assertions
+- 17 new unit tests (10 actor context, 7 audit fail-close)

@@ -5,6 +5,8 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import type { AppServices } from '../../services-factory.js';
+import type { UserRepository } from '@celator/db';
+import { requireDevActor } from '../../auth/index.js';
 
 const CreatePacketBody = z.object({
   taskId: z.string().min(1),
@@ -17,8 +19,6 @@ const CreatePacketBody = z.object({
 });
 
 const RecordDecisionBody = z.object({
-  operatorId: z.string().min(1),
-  operatorOrganizationId: z.string().min(1),
   clientId: z.string().min(1),
   decision: z.enum(['APPROVED', 'REJECTED', 'ESCALATED', 'NEEDS_MORE_EVIDENCE']),
   mfaFreshAt: z.string().datetime(),
@@ -27,11 +27,13 @@ const RecordDecisionBody = z.object({
   notes: z.string().max(2000).optional(),
 });
 
-export const reviewPacketRoutes: FastifyPluginAsync<{ services: AppServices }> = async (fastify, opts) => {
+export const reviewPacketRoutes: FastifyPluginAsync<{ services: AppServices; userRepo: UserRepository }> = async (fastify, opts) => {
   const { reviewPacketService, operatorApprovalService } = opts.services;
+  const { userRepo } = opts;
 
   fastify.post('/review-packets', async (request, reply) => {
-    const actorId = (request.headers['x-dev-actor-id'] as string) ?? 'dev-actor';
+    const ctx = await requireDevActor(request, reply, userRepo);
+    if (!ctx) return;
     const body = CreatePacketBody.safeParse(request.body);
     if (!body.success) {
       return reply.code(400).send({ ok: false, error: 'VALIDATION_ERROR', details: body.error.flatten() });
@@ -45,7 +47,7 @@ export const reviewPacketRoutes: FastifyPluginAsync<{ services: AppServices }> =
         ...(expiresInDays !== undefined ? { expiresInDays } : {}),
       },
       clientId,
-      actorId,
+      ctx.actor.id,
     );
     if (!result.ok) return reply.code(400).send({ ok: false, error: result.error, message: result.message });
     return reply.code(201).send({ ok: true, ...result.value });
@@ -60,6 +62,8 @@ export const reviewPacketRoutes: FastifyPluginAsync<{ services: AppServices }> =
 
   fastify.post('/approval-requests/:id/decision', async (request, reply) => {
     const { id } = request.params as { id: string };
+    const ctx = await requireDevActor(request, reply, userRepo);
+    if (!ctx) return;
     const body = RecordDecisionBody.safeParse(request.body);
     if (!body.success) {
       return reply.code(400).send({ ok: false, error: 'VALIDATION_ERROR', details: body.error.flatten() });
@@ -68,6 +72,8 @@ export const reviewPacketRoutes: FastifyPluginAsync<{ services: AppServices }> =
     const result = await operatorApprovalService.recordDecision(
       {
         approvalRequestId: id,
+        operatorId: ctx.actor.id,
+        operatorOrganizationId: ctx.actor.organizationId,
         ...decisionBase,
         mfaFreshAt: new Date(decisionBase.mfaFreshAt),
         ...(reviewStartedAtStr !== undefined ? { reviewStartedAt: new Date(reviewStartedAtStr) } : {}),
@@ -81,8 +87,6 @@ export const reviewPacketRoutes: FastifyPluginAsync<{ services: AppServices }> =
 
   // Approve/reject shorthands — convenience wrappers over the decision endpoint
   const ApproveBody = z.object({
-    operatorId: z.string().min(1),
-    operatorOrganizationId: z.string().min(1),
     clientId: z.string().min(1),
     mfaFreshAt: z.string().datetime(),
     sessionApprovalCount: z.number().int().min(0).default(0),
@@ -90,8 +94,6 @@ export const reviewPacketRoutes: FastifyPluginAsync<{ services: AppServices }> =
   });
 
   const RejectBody = z.object({
-    operatorId: z.string().min(1),
-    operatorOrganizationId: z.string().min(1),
     clientId: z.string().min(1),
     mfaFreshAt: z.string().datetime(),
     sessionApprovalCount: z.number().int().min(0).default(0),
@@ -100,6 +102,8 @@ export const reviewPacketRoutes: FastifyPluginAsync<{ services: AppServices }> =
 
   fastify.post('/approval-requests/:id/approve', async (request, reply) => {
     const { id } = request.params as { id: string };
+    const ctx = await requireDevActor(request, reply, userRepo);
+    if (!ctx) return;
     const body = ApproveBody.safeParse(request.body);
     if (!body.success) {
       return reply.code(400).send({ ok: false, error: 'VALIDATION_ERROR', details: body.error.flatten() });
@@ -110,8 +114,8 @@ export const reviewPacketRoutes: FastifyPluginAsync<{ services: AppServices }> =
         approvalRequestId: id,
         decision: 'APPROVED',
         mfaFreshAt: new Date(base.mfaFreshAt),
-        operatorId: base.operatorId,
-        operatorOrganizationId: base.operatorOrganizationId,
+        operatorId: ctx.actor.id,
+        operatorOrganizationId: ctx.actor.organizationId,
         sessionApprovalCount: base.sessionApprovalCount,
         ...(notes !== undefined ? { notes } : {}),
       },
@@ -123,6 +127,8 @@ export const reviewPacketRoutes: FastifyPluginAsync<{ services: AppServices }> =
 
   fastify.post('/approval-requests/:id/reject', async (request, reply) => {
     const { id } = request.params as { id: string };
+    const ctx = await requireDevActor(request, reply, userRepo);
+    if (!ctx) return;
     const body = RejectBody.safeParse(request.body);
     if (!body.success) {
       return reply.code(400).send({ ok: false, error: 'VALIDATION_ERROR', details: body.error.flatten() });
@@ -133,8 +139,8 @@ export const reviewPacketRoutes: FastifyPluginAsync<{ services: AppServices }> =
         approvalRequestId: id,
         decision: 'REJECTED',
         mfaFreshAt: new Date(base.mfaFreshAt),
-        operatorId: base.operatorId,
-        operatorOrganizationId: base.operatorOrganizationId,
+        operatorId: ctx.actor.id,
+        operatorOrganizationId: ctx.actor.organizationId,
         sessionApprovalCount: base.sessionApprovalCount,
         ...(notes !== undefined ? { notes } : {}),
       },

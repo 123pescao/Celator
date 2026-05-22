@@ -23,7 +23,7 @@ export class ClientService {
       status: 'PENDING_IDENTITY_VERIFICATION',
     });
 
-    await this.audit.write({
+    const auditResult = await this.audit.write({
       eventType: 'CLIENT_CREATED',
       actorId,
       actorType: 'OPERATOR',
@@ -32,6 +32,7 @@ export class ClientService {
       resourceType: 'Client',
       outcome: 'ALLOWED',
     });
+    if (!auditResult.ok) return auditResult;
 
     return ok(client);
   }
@@ -56,7 +57,7 @@ export class ClientService {
 
     const updated = await this.repo.updateStatus(clientId, 'ACTIVE');
 
-    await this.audit.write({
+    const auditResult = await this.audit.write({
       eventType: 'CLIENT_ACTIVATED',
       actorId,
       actorType: 'OPERATOR',
@@ -66,6 +67,7 @@ export class ClientService {
       outcome: 'ALLOWED',
       metadata: { previousStatus: existing.status },
     });
+    if (!auditResult.ok) return auditResult;
 
     return ok(updated);
   }
@@ -76,7 +78,7 @@ export class ClientService {
 
     const updated = await this.repo.updateStatus(clientId, status);
 
-    await this.audit.write({
+    const auditResult = await this.audit.write({
       eventType: 'CLIENT_STATUS_CHANGED',
       actorId,
       actorType: 'OPERATOR',
@@ -86,6 +88,7 @@ export class ClientService {
       outcome: 'ALLOWED',
       metadata: { fromStatus: existing.status, toStatus: status },
     });
+    if (!auditResult.ok) return auditResult;
 
     return ok(updated);
   }
@@ -100,7 +103,7 @@ export class ClientService {
 
     const updated = await this.repo.update(clientId, flags);
 
-    await this.audit.write({
+    const auditResult = await this.audit.write({
       eventType: 'CLIENT_FLAGS_UPDATED',
       actorId,
       actorType: 'OPERATOR',
@@ -110,6 +113,7 @@ export class ClientService {
       outcome: 'ALLOWED',
       metadata: flags,
     });
+    if (!auditResult.ok) return auditResult;
 
     return ok(updated);
   }

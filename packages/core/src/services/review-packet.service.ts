@@ -102,25 +102,25 @@ export class ReviewPacketService {
       expiresAt,
     });
 
-    await Promise.all([
-      this.audit.write({
-        eventType: 'REVIEW_PACKET_CREATED',
-        actorId,
-        actorType: 'OPERATOR',
-        clientId,
-        resourceId: approvalRequest.id,
-        resourceType: 'ApprovalRequest',
-        outcome: 'ALLOWED',
-        metadata: { taskId: input.taskId, snapshotId: snapshot.id, riskTier: task.riskTier },
-      }),
-      this.timeline.append({
-        caseId: task.caseId,
-        taskId: input.taskId,
-        eventType: 'REVIEW_PACKET_CREATED',
-        actorId,
-        actorType: 'OPERATOR',
-      }),
-    ]);
+    const auditResult = await this.audit.write({
+      eventType: 'REVIEW_PACKET_CREATED',
+      actorId,
+      actorType: 'OPERATOR',
+      clientId,
+      resourceId: approvalRequest.id,
+      resourceType: 'ApprovalRequest',
+      outcome: 'ALLOWED',
+      metadata: { taskId: input.taskId, snapshotId: snapshot.id, riskTier: task.riskTier },
+    });
+    if (!auditResult.ok) return auditResult;
+
+    await this.timeline.append({
+      caseId: task.caseId,
+      taskId: input.taskId,
+      eventType: 'REVIEW_PACKET_CREATED',
+      actorId,
+      actorType: 'OPERATOR',
+    });
 
     return ok({ approvalRequest, snapshotId: snapshot.id, payloadHash });
   }

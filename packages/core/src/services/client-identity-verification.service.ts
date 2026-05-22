@@ -24,7 +24,7 @@ export class ClientIdentityVerificationService {
       status: 'PENDING',
     });
 
-    await this.audit.write({
+    const auditResult = await this.audit.write({
       eventType: 'IDENTITY_VERIFICATION_CREATED',
       actorId,
       actorType: 'OPERATOR',
@@ -33,6 +33,7 @@ export class ClientIdentityVerificationService {
       resourceType: 'ClientIdentityVerification',
       outcome: 'ALLOWED',
     });
+    if (!auditResult.ok) return auditResult;
 
     return ok(record);
   }
@@ -53,7 +54,7 @@ export class ClientIdentityVerificationService {
       operatorId,
     });
 
-    await this.audit.write({
+    const auditResult = await this.audit.write({
       eventType: 'IDENTITY_VERIFICATION_ATTESTED',
       actorId: operatorId,
       actorType: 'OPERATOR',
@@ -62,6 +63,7 @@ export class ClientIdentityVerificationService {
       resourceType: 'ClientIdentityVerification',
       outcome: 'ALLOWED',
     });
+    if (!auditResult.ok) return auditResult;
 
     return ok(updated);
   }
@@ -82,9 +84,10 @@ export class ClientIdentityVerificationService {
     const updated = await this.repo.updateStatus(verificationId, 'VERIFIED', { verifiedAt: new Date() });
 
     // Activate the client now that identity is verified
-    await this.clientService.activateAfterVerification(existing.clientId, operatorId);
+    const activateResult = await this.clientService.activateAfterVerification(existing.clientId, operatorId);
+    if (!activateResult.ok) return activateResult;
 
-    await this.audit.write({
+    const auditResult = await this.audit.write({
       eventType: 'IDENTITY_VERIFICATION_COMPLETED',
       actorId: operatorId,
       actorType: 'OPERATOR',
@@ -93,6 +96,7 @@ export class ClientIdentityVerificationService {
       resourceType: 'ClientIdentityVerification',
       outcome: 'ALLOWED',
     });
+    if (!auditResult.ok) return auditResult;
 
     return ok(updated);
   }
@@ -113,7 +117,7 @@ export class ClientIdentityVerificationService {
       rejectionReason,
     });
 
-    await this.audit.write({
+    const auditResult = await this.audit.write({
       eventType: 'IDENTITY_VERIFICATION_REJECTED',
       actorId: operatorId,
       actorType: 'OPERATOR',
@@ -123,6 +127,7 @@ export class ClientIdentityVerificationService {
       outcome: 'ALLOWED',
       metadata: { rejectionReason },
     });
+    if (!auditResult.ok) return auditResult;
 
     return ok(updated);
   }

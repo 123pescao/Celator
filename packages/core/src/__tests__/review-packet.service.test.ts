@@ -168,4 +168,21 @@ describe('ReviewPacketService', () => {
       if (!result.ok) expect(result.error).toBe('SNAPSHOT_NOT_FOUND');
     });
   });
+
+  describe('audit fail-close', () => {
+    it('create propagates audit failure', async () => {
+      const AUDIT_ERR = { ok: false as const, error: 'AUDIT_LOG_FAILED' as const, message: 'DB down' };
+      const audit = { write: vi.fn().mockResolvedValue(AUDIT_ERR) } as unknown as AuditService;
+      const taskRepo = { findById: vi.fn().mockResolvedValue(FAKE_TASK) } as unknown as CleanupTaskRepository;
+      const authRepo = { findById: vi.fn().mockResolvedValue(FAKE_AUTH) } as unknown as ClientAuthorizationRepository;
+      const svc2 = new ReviewPacketService(snapshotRepo, requestRepo, taskRepo, authRepo, audit, { append: vi.fn() } as unknown as CaseTimelineService);
+      const result = await svc2.create(
+        { taskId: 'task_001', authorizationId: 'auth_001', redactedPreview: 'Preview' },
+        'client_001',
+        'op_001',
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('AUDIT_LOG_FAILED');
+    });
+  });
 });

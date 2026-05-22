@@ -6,6 +6,8 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import type { AppServices } from '../../services-factory.js';
+import type { UserRepository } from '@celator/db';
+import { requireDevActor } from '../../auth/index.js';
 
 const CreateClientBody = z.object({
   organizationId: z.string().min(1),
@@ -18,24 +20,24 @@ const UpdateStatusBody = z.object({
 
 const AttestBody = z.object({
   operatorAttestation: z.string().min(1).max(2000),
-  operatorId: z.string().min(1),
 });
 
 const RejectVerificationBody = z.object({
   rejectionReason: z.string().min(1).max(2000),
-  operatorId: z.string().min(1),
 });
 
-export const clientRoutes: FastifyPluginAsync<{ services: AppServices }> = async (fastify, opts) => {
+export const clientRoutes: FastifyPluginAsync<{ services: AppServices; userRepo: UserRepository }> = async (fastify, opts) => {
   const { clientService, civService, audit } = opts.services;
+  const { userRepo } = opts;
 
   fastify.post('/clients', async (request, reply) => {
-    const actorId = (request.headers['x-dev-actor-id'] as string) ?? 'dev-actor';
+    const ctx = await requireDevActor(request, reply, userRepo);
+    if (!ctx) return;
     const body = CreateClientBody.safeParse(request.body);
     if (!body.success) {
       return reply.code(400).send({ ok: false, error: 'VALIDATION_ERROR', details: body.error.flatten() });
     }
-    const result = await clientService.create(body.data, actorId);
+    const result = await clientService.create(body.data, ctx.actor.id);
     if (!result.ok) return reply.code(400).send({ ok: false, error: result.error, message: result.message });
     return reply.code(201).send({ ok: true, client: result.value });
   });
@@ -55,12 +57,13 @@ export const clientRoutes: FastifyPluginAsync<{ services: AppServices }> = async
 
   fastify.patch('/clients/:id/status', async (request, reply) => {
     const { id } = request.params as { id: string };
-    const actorId = (request.headers['x-dev-actor-id'] as string) ?? 'dev-actor';
+    const ctx = await requireDevActor(request, reply, userRepo);
+    if (!ctx) return;
     const body = UpdateStatusBody.safeParse(request.body);
     if (!body.success) {
       return reply.code(400).send({ ok: false, error: 'VALIDATION_ERROR', details: body.error.flatten() });
     }
-    const result = await clientService.updateStatus(id, body.data.status, actorId);
+    const result = await clientService.updateStatus(id, body.data.status, ctx.actor.id);
     if (!result.ok) return reply.code(400).send({ ok: false, error: result.error, message: result.message });
     return reply.send({ ok: true, client: result.value });
   });
@@ -68,8 +71,9 @@ export const clientRoutes: FastifyPluginAsync<{ services: AppServices }> = async
   // Identity verification
   fastify.post('/clients/:clientId/identity-verification', async (request, reply) => {
     const { clientId } = request.params as { clientId: string };
-    const actorId = (request.headers['x-dev-actor-id'] as string) ?? 'dev-actor';
-    const result = await civService.createRecord(clientId, actorId);
+    const ctx = await requireDevActor(request, reply, userRepo);
+    if (!ctx) return;
+    const result = await civService.createRecord(clientId, ctx.actor.id);
     if (!result.ok) return reply.code(result.error === 'CLIENT_NOT_FOUND' ? 404 : 400).send({ ok: false, error: result.error, message: result.message });
     return reply.code(201).send({ ok: true, verification: result.value });
   });
@@ -83,6 +87,8 @@ export const clientRoutes: FastifyPluginAsync<{ services: AppServices }> = async
 
   fastify.post('/identity-verifications/:verificationId/attest', async (request, reply) => {
     const { verificationId } = request.params as { verificationId: string };
+    const ctx = await requireDevActor(request, reply, userRepo);
+    if (!ctx) return;
     const body = AttestBody.safeParse(request.body);
     if (!body.success) {
       return reply.code(400).send({ ok: false, error: 'VALIDATION_ERROR', details: body.error.flatten() });
@@ -90,7 +96,7 @@ export const clientRoutes: FastifyPluginAsync<{ services: AppServices }> = async
     const result = await civService.recordOperatorAttestation(
       verificationId,
       body.data.operatorAttestation,
-      body.data.operatorId,
+      ctx.actor.id,
     );
     if (!result.ok) return reply.code(result.error === 'NOT_FOUND' ? 404 : 400).send({ ok: false, error: result.error, message: result.message });
     return reply.send({ ok: true, verification: result.value });
@@ -98,20 +104,22 @@ export const clientRoutes: FastifyPluginAsync<{ services: AppServices }> = async
 
   fastify.post('/identity-verifications/:verificationId/complete', async (request, reply) => {
     const { verificationId } = request.params as { verificationId: string };
-    const actorId = (request.headers['x-dev-actor-id'] as string) ?? 'dev-actor';
-    const result = await civService.completeVerification(verificationId, actorId);
+    const ctx = await requireDevActor(request, reply, userRepo);
+    if (!ctx) return;
+    const result = await civService.completeVerification(verificationId, ctx.actor.id);
     if (!result.ok) return reply.code(result.error === 'NOT_FOUND' ? 404 : 400).send({ ok: false, error: result.error, message: result.message });
     return reply.send({ ok: true, verification: result.value });
   });
 
   fastify.post('/identity-verifications/:verificationId/reject', async (request, reply) => {
     const { verificationId } = request.params as { verificationId: string };
-    const actorId = (request.headers['x-dev-actor-id'] as string) ?? 'dev-actor';
+    const ctx = await requireDevActor(request, reply, userRepo);
+    if (!ctx) return;
     const body = RejectVerificationBody.safeParse(request.body);
     if (!body.success) {
       return reply.code(400).send({ ok: false, error: 'VALIDATION_ERROR', details: body.error.flatten() });
     }
-    const result = await civService.rejectVerification(verificationId, body.data.rejectionReason, actorId);
+    const result = await civService.rejectVerification(verificationId, body.data.rejectionReason, ctx.actor.id);
     if (!result.ok) return reply.code(result.error === 'NOT_FOUND' ? 404 : 400).send({ ok: false, error: result.error, message: result.message });
     return reply.send({ ok: true, verification: result.value });
   });
