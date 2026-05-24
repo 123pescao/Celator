@@ -23,6 +23,8 @@ import {
   IdentityVaultAccessLogRepository,
   DataSourceTargetRepository,
   ManualRemovalSubmissionRepository,
+  RemovalPlaybookRepository,
+  TaskWorkflowRunRepository,
 } from '@celator/db';
 import {
   AuditService,
@@ -38,6 +40,7 @@ import {
   DataSourceTargetService,
   RemovalRequestDraftService,
   ManualRemovalSubmissionService,
+  WorkflowEngineService,
 } from '@celator/core';
 import { getKmsProvider } from '@celator/security';
 
@@ -64,6 +67,8 @@ export function buildServices() {
   const vaultAccessLogRepo = new IdentityVaultAccessLogRepository(db);
   const dataSourceTargetRepo = new DataSourceTargetRepository(db);
   const manualSubmissionRepo = new ManualRemovalSubmissionRepository(db);
+  const playbookRepo = new RemovalPlaybookRepository(db);
+  const workflowRunRepo = new TaskWorkflowRunRepository(db);
 
   // Services
   const audit = new AuditService(auditRepo);
@@ -107,10 +112,11 @@ export function buildServices() {
     audit,
     timeline,
   );
+  const workflowEngineService = new WorkflowEngineService(playbookRepo, workflowRunRepo, taskRepo, audit, timeline);
 
   return {
-    repos: { orgRepo, userRepo, clientRepo, civRepo, consentVersionRepo, authorizationRepo, caseRepo, taskRepo, snapshotRepo, requestRepo, approvalRepo, auditRepo, timelineRepo, evidenceRepo, vaultRecordRepo, vaultAccessLogRepo, dataSourceTargetRepo, manualSubmissionRepo },
-    services: { audit, timeline, clientService, civService, consentService, caseService, taskService, reviewPacketService, operatorApprovalService, vaultService, dataSourceTargetService, removalDraftService, manualSubmissionService },
+    repos: { orgRepo, userRepo, clientRepo, civRepo, consentVersionRepo, authorizationRepo, caseRepo, taskRepo, snapshotRepo, requestRepo, approvalRepo, auditRepo, timelineRepo, evidenceRepo, vaultRecordRepo, vaultAccessLogRepo, dataSourceTargetRepo, manualSubmissionRepo, playbookRepo, workflowRunRepo },
+    services: { audit, timeline, clientService, civService, consentService, caseService, taskService, reviewPacketService, operatorApprovalService, vaultService, dataSourceTargetService, removalDraftService, manualSubmissionService, workflowEngineService },
   };
 }
 

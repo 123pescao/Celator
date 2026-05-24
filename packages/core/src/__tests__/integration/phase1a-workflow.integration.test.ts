@@ -29,6 +29,8 @@ import {
   IdentityVaultAccessLogRepository,
   DataSourceTargetRepository,
   ManualRemovalSubmissionRepository,
+  RemovalPlaybookRepository,
+  TaskWorkflowRunRepository,
 } from '@celator/db';
 import { LocalKmsProvider } from '@celator/security';
 import {
@@ -45,6 +47,7 @@ import {
   DataSourceTargetService,
   RemovalRequestDraftService,
   ManualRemovalSubmissionService,
+  WorkflowEngineService,
 } from '../../index.js';
 
 // ---------------------------------------------------------------------------
@@ -175,7 +178,19 @@ async function cleanupTestData(): Promise<void> {
     await db.manualRemovalSubmission.deleteMany({ where: { taskId: { in: testTaskIds } } });
   }
 
-  // 10b. cleanup_tasks → cleanup_cases (caseId FK)
+  // 10b. task_workflow_step_runs → task_workflow_runs (workflowRunId FK)
+  //      task_workflow_runs → cleanup_tasks (taskId FK)
+  if (testTaskIds.length > 0) {
+    const runIds = (
+      await db.taskWorkflowRun.findMany({ where: { taskId: { in: testTaskIds } }, select: { id: true } })
+    ).map((r) => r.id);
+    if (runIds.length > 0) {
+      await db.taskWorkflowStepRun.deleteMany({ where: { workflowRunId: { in: runIds } } });
+    }
+    await db.taskWorkflowRun.deleteMany({ where: { taskId: { in: testTaskIds } } });
+  }
+
+  // 10c. cleanup_tasks → cleanup_cases (caseId FK)
   if (testCaseIds.length > 0) {
     await db.cleanupTask.deleteMany({ where: { caseId: { in: testCaseIds } } });
   }
@@ -279,6 +294,8 @@ function buildTestServices() {
   const vaultAccessLogRepo = new IdentityVaultAccessLogRepository(db);
   const dataSourceTargetRepo = new DataSourceTargetRepository(db);
   const manualSubmissionRepo = new ManualRemovalSubmissionRepository(db);
+  const playbookRepo = new RemovalPlaybookRepository(db);
+  const workflowRunRepo = new TaskWorkflowRunRepository(db);
 
   const audit = new AuditService(auditRepo);
   const timeline = new CaseTimelineService(timelineRepo);
@@ -299,12 +316,14 @@ function buildTestServices() {
   const manualSubmissionService = new ManualRemovalSubmissionService(
     manualSubmissionRepo, taskRepo, dataSourceTargetRepo, audit, timeline,
   );
+  const workflowEngineService = new WorkflowEngineService(playbookRepo, workflowRunRepo, taskRepo, audit, timeline);
 
   return {
     orgRepo, userRepo,
     clientService, civService, consentService, caseService, taskService,
     reviewPacketService, operatorApprovalService, audit, timeline,
     vaultService, dataSourceTargetService, removalDraftService, manualSubmissionService,
+    workflowEngineService, playbookRepo, workflowRunRepo,
   };
 }
 
@@ -1356,5 +1375,378 @@ describe('Phase 1F manual removal workflow (integration)', () => {
     const secondOutcome = await manualSubmissionService.recordOutcome(createResult.value.id, { status: 'COMPLETED' }, clientId, TEST_ACTOR_ID);
     expect(secondOutcome.ok).toBe(false);
     if (!secondOutcome.ok) expect(secondOutcome.error).toBe('MANUAL_SUBMISSION_INVALID_STATUS');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 2A: Workflow Engine + Playbooks (integration)
+// ---------------------------------------------------------------------------
+
+describe('Phase 2A workflow engine (integration)', () => {
+  let workflowEngineService: WorkflowEngineService;
+  let manualSubmissionService: ManualRemovalSubmissionService;
+  let dataSourceTargetService: DataSourceTargetService;
+  let taskService: CleanupTaskService;
+  let caseService: CleanupCaseService;
+  let clientService: ClientService;
+  let civService: ClientIdentityVerificationService;
+  let consentService: ConsentWorkflowService;
+
+  let clientId = '';
+  let caseId = '';
+  let taskId = '';
+  let authorizationId = '';
+  let targetId = '';
+
+  beforeAll(async () => {
+    const services = buildTestServices();
+    workflowEngineService = services.workflowEngineService;
+    manualSubmissionService = services.manualSubmissionService;
+    dataSourceTargetService = services.dataSourceTargetService;
+    taskService = services.taskService;
+    caseService = services.caseService;
+    clientService = services.clientService;
+    civService = services.civService;
+    consentService = services.consentService;
+  });
+
+  afterAll(async () => {
+    await cleanupTestData();
+  });
+
+  beforeEach(async () => {
+    await cleanupTestData();
+    const newOrg = await db.organization.create({ data: { name: `${TEST_PREFIX}bootstrap_org` } });
+    BOOTSTRAP_ORG_ID = newOrg.id;
+    const newUser = await db.user.create({
+      data: {
+        organization: { connect: { id: BOOTSTRAP_ORG_ID } },
+        email: `${TEST_PREFIX}actor@integration.invalid`,
+        displayName: `${TEST_PREFIX}Integration Test Actor`,
+      },
+    });
+    TEST_ACTOR_ID = newUser.id;
+
+    const s = suffix();
+    const clientResult = await clientService.create({ organizationId: BOOTSTRAP_ORG_ID, displayName: `it_client_2a_${s}` }, TEST_ACTOR_ID);
+    expect(clientResult.ok).toBe(true);
+    if (!clientResult.ok) return;
+    clientId = clientResult.value.id;
+
+    const civCreate = await civService.createRecord(clientId, TEST_ACTOR_ID);
+    expect(civCreate.ok).toBe(true);
+    if (!civCreate.ok) return;
+    await civService.recordOperatorAttestation(civCreate.value.id, 'Verified for Phase 2A integration test', TEST_ACTOR_ID);
+    await civService.completeVerification(civCreate.value.id, TEST_ACTOR_ID);
+
+    const cvResult = await consentService.createConsentVersion(`999.2a.${s}`, 'a'.repeat(64), new Date(), undefined, TEST_ACTOR_ID);
+    expect(cvResult.ok).toBe(true);
+    if (!cvResult.ok) return;
+
+    const authResult = await consentService.createAuthorization(
+      { clientId, consentVersionId: cvResult.value.id, authorizationType: 'SELF', scopeNames: ['DATA_BROKER_OPT_OUT'], jurisdiction: 'US', signedAt: new Date() },
+      TEST_ACTOR_ID,
+    );
+    expect(authResult.ok).toBe(true);
+    if (!authResult.ok) return;
+    authorizationId = authResult.value.id;
+
+    const caseResult = await caseService.create({ clientId, authorizationId }, TEST_ACTOR_ID);
+    expect(caseResult.ok).toBe(true);
+    if (!caseResult.ok) return;
+    caseId = caseResult.value.id;
+
+    const targetResult = await dataSourceTargetService.create({
+      sourceName: `it_target_2a_${s}`,
+      sourceType: 'DATA_BROKER',
+      piiRequiredFields: ['EMAIL'],
+      supportedActionTypes: ['OPT_OUT'],
+    });
+    expect(targetResult.ok).toBe(true);
+    if (!targetResult.ok) return;
+    targetId = targetResult.value.id;
+
+    const taskResult = await taskService.create(
+      { caseId, dataSourceTargetId: targetId, actionType: 'OPT_OUT', riskTier: 'STANDARD' },
+      clientId,
+      TEST_ACTOR_ID,
+    );
+    expect(taskResult.ok).toBe(true);
+    if (!taskResult.ok) return;
+    taskId = taskResult.value.id;
+  });
+
+  it('creates a playbook with ordered steps', async () => {
+    const result = await workflowEngineService.createPlaybook(
+      {
+        name: `it_playbook_${suffix()}`,
+        version: '1.0.0',
+        sourceType: 'DATA_BROKER',
+        steps: [
+          { stepOrder: 1, stepKind: 'VERIFY_TARGET_REQUIREMENTS', title: 'Verify', instructions: 'Check the target is active.' },
+          { stepOrder: 2, stepKind: 'MANUAL_SUBMISSION', title: 'Submit', instructions: 'Submit the opt-out request manually.' },
+          { stepOrder: 3, stepKind: 'CLOSE_TASK', title: 'Close', instructions: 'Mark the task complete.' },
+        ],
+      },
+      TEST_ACTOR_ID,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.steps).toHaveLength(3);
+    expect(result.value.steps[0]?.stepKind).toBe('VERIFY_TARGET_REQUIREMENTS');
+    expect(result.value.steps[1]?.stepKind).toBe('MANUAL_SUBMISSION');
+    // Audit event written
+    const logs = await db.auditLog.findMany({ where: { eventType: 'WORKFLOW_PLAYBOOK_CREATED', resourceId: result.value.id } });
+    expect(logs).toHaveLength(1);
+  });
+
+  it('starts a workflow and marks first step READY', async () => {
+    const pb = await workflowEngineService.createPlaybook(
+      {
+        name: `it_pb_start_${suffix()}`,
+        version: '1.0.0',
+        steps: [
+          { stepOrder: 1, stepKind: 'VERIFY_TARGET_REQUIREMENTS', title: 'Verify', instructions: 'Check requirements.' },
+          { stepOrder: 2, stepKind: 'MANUAL_SUBMISSION', title: 'Submit', instructions: 'Submit manually.' },
+        ],
+      },
+      TEST_ACTOR_ID,
+    );
+    expect(pb.ok).toBe(true);
+    if (!pb.ok) return;
+
+    const startResult = await workflowEngineService.startWorkflowForTask(
+      { taskId, clientId, playbookId: pb.value.id },
+      TEST_ACTOR_ID,
+    );
+    expect(startResult.ok).toBe(true);
+    if (!startResult.ok) return;
+    expect(startResult.value.run.taskId).toBe(taskId);
+    expect(startResult.value.run.status).toBe('IN_PROGRESS');
+    expect(startResult.value.steps[0]?.status).toBe('READY');
+    expect(startResult.value.steps[1]?.status).toBe('PENDING');
+
+    // Timeline event
+    const events = await db.caseTimelineEvent.findMany({ where: { caseId, eventType: 'WORKFLOW_STARTED' } });
+    expect(events).toHaveLength(1);
+  });
+
+  it('advances a step and moves next step to READY', async () => {
+    const pb = await workflowEngineService.createPlaybook(
+      {
+        name: `it_pb_adv_${suffix()}`,
+        version: '1.0.0',
+        steps: [
+          { stepOrder: 1, stepKind: 'VERIFY_TARGET_REQUIREMENTS', title: 'Verify', instructions: 'Verify requirements.' },
+          { stepOrder: 2, stepKind: 'MANUAL_SUBMISSION', title: 'Submit', instructions: 'Submit the request.' },
+          { stepOrder: 3, stepKind: 'CLOSE_TASK', title: 'Close', instructions: 'Close the task.' },
+        ],
+      },
+      TEST_ACTOR_ID,
+    );
+    expect(pb.ok).toBe(true);
+    if (!pb.ok) return;
+
+    const startResult = await workflowEngineService.startWorkflowForTask({ taskId, clientId, playbookId: pb.value.id }, TEST_ACTOR_ID);
+    expect(startResult.ok).toBe(true);
+    if (!startResult.ok) return;
+
+    const firstStepRun = startResult.value.steps.find((s) => s.status === 'READY');
+    expect(firstStepRun).toBeDefined();
+
+    const advResult = await workflowEngineService.advanceStep(
+      startResult.value.run.id,
+      firstStepRun!.id,
+      { safeResultSummary: 'Requirements verified — target is active' },
+      clientId,
+      TEST_ACTOR_ID,
+    );
+    expect(advResult.ok).toBe(true);
+    if (!advResult.ok) return;
+    const completedStep = advResult.value.steps.find((s) => s.id === firstStepRun!.id);
+    const nextStep = advResult.value.steps.find((s) => s.stepOrder === 2);
+    expect(completedStep?.status).toBe('COMPLETED');
+    expect(nextStep?.status).toBe('READY');
+  });
+
+  it('completes workflow when last step advances', async () => {
+    const pb = await workflowEngineService.createPlaybook(
+      {
+        name: `it_pb_fin_${suffix()}`,
+        version: '1.0.0',
+        steps: [
+          { stepOrder: 1, stepKind: 'VERIFY_TARGET_REQUIREMENTS', title: 'Verify', instructions: 'Verify the target.' },
+        ],
+      },
+      TEST_ACTOR_ID,
+    );
+    expect(pb.ok).toBe(true);
+    if (!pb.ok) return;
+
+    const startResult = await workflowEngineService.startWorkflowForTask({ taskId, clientId, playbookId: pb.value.id }, TEST_ACTOR_ID);
+    expect(startResult.ok).toBe(true);
+    if (!startResult.ok) return;
+
+    const stepRun = startResult.value.steps[0]!;
+    const advResult = await workflowEngineService.advanceStep(startResult.value.run.id, stepRun.id, {}, clientId, TEST_ACTOR_ID);
+    expect(advResult.ok).toBe(true);
+    if (!advResult.ok) return;
+    expect(advResult.value.run.status).toBe('COMPLETED');
+
+    const completedEvents = await db.caseTimelineEvent.findMany({ where: { caseId, eventType: 'WORKFLOW_COMPLETED' } });
+    expect(completedEvents).toHaveLength(1);
+  });
+
+  it('blocks a workflow step with a safe reason', async () => {
+    const pb = await workflowEngineService.createPlaybook(
+      {
+        name: `it_pb_blk_${suffix()}`,
+        version: '1.0.0',
+        steps: [
+          { stepOrder: 1, stepKind: 'VERIFY_TARGET_REQUIREMENTS', title: 'Verify', instructions: 'Check requirements.' },
+        ],
+      },
+      TEST_ACTOR_ID,
+    );
+    expect(pb.ok).toBe(true);
+    if (!pb.ok) return;
+
+    const startResult = await workflowEngineService.startWorkflowForTask({ taskId, clientId, playbookId: pb.value.id }, TEST_ACTOR_ID);
+    expect(startResult.ok).toBe(true);
+    if (!startResult.ok) return;
+
+    const stepRun = startResult.value.steps[0]!;
+    const blockResult = await workflowEngineService.blockStep(
+      startResult.value.run.id,
+      stepRun.id,
+      { reason: 'Target portal unavailable — no PII here' },
+      clientId,
+      TEST_ACTOR_ID,
+    );
+    expect(blockResult.ok).toBe(true);
+    if (!blockResult.ok) return;
+    expect(blockResult.value.run.status).toBe('BLOCKED');
+    const blockedStep = blockResult.value.steps.find((s) => s.id === stepRun.id);
+    expect(blockedStep?.status).toBe('BLOCKED');
+  });
+
+  it('links a manual submission to a MANUAL_SUBMISSION step', async () => {
+    const pb = await workflowEngineService.createPlaybook(
+      {
+        name: `it_pb_sub_${suffix()}`,
+        version: '1.0.0',
+        steps: [
+          { stepOrder: 1, stepKind: 'VERIFY_TARGET_REQUIREMENTS', title: 'Verify', instructions: 'Verify requirements.' },
+          { stepOrder: 2, stepKind: 'MANUAL_SUBMISSION', title: 'Submit', instructions: 'Submit the request.', requiresManualSubmission: true },
+        ],
+      },
+      TEST_ACTOR_ID,
+    );
+    expect(pb.ok).toBe(true);
+    if (!pb.ok) return;
+
+    const startResult = await workflowEngineService.startWorkflowForTask({ taskId, clientId, playbookId: pb.value.id }, TEST_ACTOR_ID);
+    expect(startResult.ok).toBe(true);
+    if (!startResult.ok) return;
+
+    // Advance first step to unlock second
+    const firstStepRun = startResult.value.steps[0]!;
+    await workflowEngineService.advanceStep(startResult.value.run.id, firstStepRun.id, {}, clientId, TEST_ACTOR_ID);
+
+    // Create a manual submission
+    const subResult = await manualSubmissionService.createForTask(
+      { taskId, clientId, submissionMethod: 'WEB_FORM', redactedSummary: 'OPT_OUT to it_broker — EMAIL: i***@vault.invalid' },
+      TEST_ACTOR_ID,
+    );
+    expect(subResult.ok).toBe(true);
+    if (!subResult.ok) return;
+
+    // Fetch updated state to find the MANUAL_SUBMISSION step run ID
+    const stateResult = await workflowEngineService.getWorkflowStateByTaskId(taskId);
+    expect(stateResult.ok).toBe(true);
+    if (!stateResult.ok) return;
+    const submissionStepRun = stateResult.value.steps.find((s) => s.stepKind === 'MANUAL_SUBMISSION');
+    expect(submissionStepRun).toBeDefined();
+
+    const attachResult = await workflowEngineService.attachManualSubmission(
+      startResult.value.run.id,
+      submissionStepRun!.id,
+      { manualSubmissionId: subResult.value.id },
+      clientId,
+      TEST_ACTOR_ID,
+    );
+    expect(attachResult.ok).toBe(true);
+    if (!attachResult.ok) return;
+    const linkedStep = attachResult.value.steps.find((s) => s.stepKind === 'MANUAL_SUBMISSION');
+    expect(linkedStep?.manualSubmissionId).toBe(subResult.value.id);
+
+    // Audit event
+    const auditLogs = await db.auditLog.findMany({ where: { eventType: 'WORKFLOW_MANUAL_SUBMISSION_LINKED', clientId } });
+    expect(auditLogs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('returns WORKFLOW_RUN_NOT_FOUND for missing run', async () => {
+    const result = await workflowEngineService.getWorkflowState('nonexistent-run-id');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toBe('WORKFLOW_RUN_NOT_FOUND');
+  });
+
+  it('returns PLAYBOOK_NOT_FOUND when no auto-select playbook exists for target', async () => {
+    // No playbooks linked to this target
+    const result = await workflowEngineService.startWorkflowForTask({ taskId, clientId }, TEST_ACTOR_ID);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toBe('PLAYBOOK_NOT_FOUND');
+  });
+
+  it('workflow state response contains no plaintext PII or ciphertext', async () => {
+    const pb = await workflowEngineService.createPlaybook(
+      {
+        name: `it_pb_pii_${suffix()}`,
+        version: '1.0.0',
+        steps: [{ stepOrder: 1, stepKind: 'VERIFY_TARGET_REQUIREMENTS', title: 'Verify', instructions: 'Check target.' }],
+      },
+      TEST_ACTOR_ID,
+    );
+    expect(pb.ok).toBe(true);
+    if (!pb.ok) return;
+
+    const startResult = await workflowEngineService.startWorkflowForTask({ taskId, clientId, playbookId: pb.value.id }, TEST_ACTOR_ID);
+    expect(startResult.ok).toBe(true);
+    if (!startResult.ok) return;
+
+    const json = JSON.stringify(startResult.value);
+    expect(json).not.toContain('ciphertext');
+    expect(json).not.toContain('authTag');
+    expect(json).not.toContain('encryptedKeyRef');
+    // No raw email patterns
+    expect(json).not.toMatch(/[a-z0-9._%+-]+@(?!vault\.invalid)[a-z0-9.-]+\.[a-z]{2,}/);
+  });
+
+  it('audit logs contain WORKFLOW_STARTED and WORKFLOW_STEP_ADVANCED events', async () => {
+    const pb = await workflowEngineService.createPlaybook(
+      {
+        name: `it_pb_aud_${suffix()}`,
+        version: '1.0.0',
+        steps: [
+          { stepOrder: 1, stepKind: 'VERIFY_TARGET_REQUIREMENTS', title: 'Verify', instructions: 'Verify the target.' },
+          { stepOrder: 2, stepKind: 'CLOSE_TASK', title: 'Close', instructions: 'Close the task.' },
+        ],
+      },
+      TEST_ACTOR_ID,
+    );
+    expect(pb.ok).toBe(true);
+    if (!pb.ok) return;
+
+    const startResult = await workflowEngineService.startWorkflowForTask({ taskId, clientId, playbookId: pb.value.id }, TEST_ACTOR_ID);
+    expect(startResult.ok).toBe(true);
+    if (!startResult.ok) return;
+
+    const firstStep = startResult.value.steps[0]!;
+    await workflowEngineService.advanceStep(startResult.value.run.id, firstStep.id, {}, clientId, TEST_ACTOR_ID);
+
+    const logs = await db.auditLog.findMany({ where: { clientId }, orderBy: { createdAt: 'asc' } });
+    const eventTypes = logs.map((l) => l.eventType);
+    expect(eventTypes).toContain('WORKFLOW_STARTED');
+    expect(eventTypes).toContain('WORKFLOW_STEP_ADVANCED');
   });
 });

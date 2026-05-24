@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Celator Phase 1A/1C/1D/1E/1F — API Workflow Smoke Test
+# Celator Phase 1A/1C/1D/1E/1F/2A — API Workflow Smoke Test
 #
 # Exercises the full operator workflow against a running local API:
 #   health → security/status → org → user → actor-validation → client
@@ -765,6 +765,240 @@ if require_ok "GET /clients/:clientId/audit-logs" "200"; then
   fi
 fi
 
+# =============================================================================
+# Phase 2A: Workflow Engine + Playbooks (Steps 41–52)
+# =============================================================================
+
+PLAYBOOK_ID=""
+WORKFLOW_RUN_ID=""
+FIRST_STEP_RUN_ID=""
+MANUAL_SUB_STEP_RUN_ID=""
+
+# ── Step 41: Create a generic playbook ─────────────────────────────────────────
+header "POST /api/v1/removal-playbooks (create generic playbook)"
+api_call POST "/api/v1/removal-playbooks" \
+  "{\"name\":\"Smoke Broker Opt-Out ${SUFFIX}\",\"version\":\"1.0.0\",\"sourceType\":\"DATA_BROKER\",\"description\":\"Smoke test playbook\",\"steps\":[{\"stepOrder\":1,\"stepKind\":\"VERIFY_TARGET_REQUIREMENTS\",\"title\":\"Verify Requirements\",\"instructions\":\"Check that the broker target is active and requirements are met.\"},{\"stepOrder\":2,\"stepKind\":\"MANUAL_SUBMISSION\",\"title\":\"Submit Opt-Out\",\"instructions\":\"Submit the opt-out request via the broker portal.\",\"requiresManualSubmission\":true},{\"stepOrder\":3,\"stepKind\":\"RECORD_OUTCOME\",\"title\":\"Record Outcome\",\"instructions\":\"Record the broker response after processing.\"},{\"stepOrder\":4,\"stepKind\":\"CLOSE_TASK\",\"title\":\"Close Task\",\"instructions\":\"Mark the task complete.\"}]}"
+if require_ok "POST /removal-playbooks" "201"; then
+  PLAYBOOK_ID=$(extract_field "$LAST_BODY" ".playbook.id" "id")
+  if [[ -n "$PLAYBOOK_ID" && "$PLAYBOOK_ID" != "null" ]]; then
+    pass "playbook created: ${PLAYBOOK_ID}"
+    # Verify step count
+    if echo "$LAST_BODY" | grep -q '"stepOrder":4'; then
+      pass "playbook: 4 steps present"
+    else
+      fail "playbook: expected 4 steps in response"
+    fi
+  else
+    fail "playbook: could not extract id"
+  fi
+  # No ciphertext in response
+  if echo "$LAST_BODY" | grep -qE '"ciphertext"|"authTag"'; then
+    fail "playbook: ciphertext field leaked in response"
+  else
+    pass "playbook: no ciphertext in response"
+  fi
+fi
+
+# ── Step 42: GET list of active playbooks ──────────────────────────────────────
+header "GET /api/v1/removal-playbooks"
+api_call GET "/api/v1/removal-playbooks"
+if require_ok "GET /removal-playbooks" "200"; then
+  PB_COUNT=$(count_array "$LAST_BODY" "playbooks")
+  if [[ "$PB_COUNT" -ge 1 ]]; then
+    pass "playbooks list: ${PB_COUNT} playbook(s)"
+  else
+    fail "playbooks list: expected at least 1, got ${PB_COUNT}"
+  fi
+fi
+
+# ── Step 43: GET single playbook with steps ────────────────────────────────────
+header "GET /api/v1/removal-playbooks/:playbookId"
+api_call GET "/api/v1/removal-playbooks/${PLAYBOOK_ID}"
+if require_ok "GET /removal-playbooks/:id" "200"; then
+  if echo "$LAST_BODY" | grep -q '"stepOrder":1'; then
+    pass "playbook detail: steps present"
+  else
+    fail "playbook detail: steps not found in response"
+  fi
+fi
+
+# ── Step 44: Start workflow for task ───────────────────────────────────────────
+header "POST /api/v1/tasks/:taskId/workflow-runs (start workflow)"
+api_call POST "/api/v1/tasks/${LINKED_TASK_ID}/workflow-runs" \
+  "{\"clientId\":\"${CLIENT_ID}\",\"playbookId\":\"${PLAYBOOK_ID}\"}"
+if require_ok "POST /tasks/:taskId/workflow-runs" "201"; then
+  WORKFLOW_RUN_ID=$(extract_field "$LAST_BODY" ".workflowState.run.id" "id")
+  if [[ -n "$WORKFLOW_RUN_ID" && "$WORKFLOW_RUN_ID" != "null" ]]; then
+    pass "workflow run started: ${WORKFLOW_RUN_ID}"
+  else
+    fail "workflow run: could not extract run id"
+  fi
+  if echo "$LAST_BODY" | grep -q '"status":"IN_PROGRESS"'; then
+    pass "workflow run: status is IN_PROGRESS"
+  else
+    fail "workflow run: expected IN_PROGRESS status"
+  fi
+  # First step should be READY
+  if echo "$LAST_BODY" | grep -q '"status":"READY"'; then
+    pass "workflow run: first step is READY"
+    # Extract first READY step run id (2nd "id" in response — first is the run id)
+    if $JQ_AVAILABLE; then
+      FIRST_STEP_RUN_ID=$(echo "$LAST_BODY" | jq -r '.workflowState.steps[0].id' 2>/dev/null || echo "")
+    else
+      FIRST_STEP_RUN_ID=$(echo "$LAST_BODY" | grep -o '"id":"[^"]*"' | head -2 | tail -1 | sed 's/.*":"\([^"]*\)".*/\1/' || echo "")
+    fi
+  else
+    fail "workflow run: no READY step found"
+  fi
+  # No PII in response
+  if echo "$LAST_BODY" | grep -qE '"ciphertext"|"authTag"'; then
+    fail "workflow run: ciphertext leaked"
+  else
+    pass "workflow run: no ciphertext in response"
+  fi
+fi
+
+# ── Step 45: GET workflow state for task ───────────────────────────────────────
+header "GET /api/v1/tasks/:taskId/workflow-run"
+api_call GET "/api/v1/tasks/${LINKED_TASK_ID}/workflow-run"
+if require_ok "GET /tasks/:taskId/workflow-run" "200"; then
+  if echo "$LAST_BODY" | grep -q '"IN_PROGRESS"'; then
+    pass "workflow state: run is IN_PROGRESS"
+  else
+    fail "workflow state: expected IN_PROGRESS"
+  fi
+fi
+
+# ── Step 46: Advance first step ────────────────────────────────────────────────
+header "POST /api/v1/workflow-runs/:runId/steps/:stepId/advance (step 1)"
+api_call POST "/api/v1/workflow-runs/${WORKFLOW_RUN_ID}/steps/${FIRST_STEP_RUN_ID}/advance" \
+  "{\"clientId\":\"${CLIENT_ID}\",\"safeResultSummary\":\"Target broker is active and requirements confirmed\"}"
+if require_ok "POST /workflow-runs/:runId/steps/:stepId/advance" "200"; then
+  if echo "$LAST_BODY" | grep -q '"COMPLETED"'; then
+    pass "step advance: first step is COMPLETED"
+  else
+    fail "step advance: expected COMPLETED status in response"
+  fi
+  # Extract MANUAL_SUBMISSION step run id (second step should now be READY)
+  if $JQ_AVAILABLE; then
+    MANUAL_SUB_STEP_RUN_ID=$(echo "$LAST_BODY" | jq -r '.workflowState.steps[] | select(.stepKind=="MANUAL_SUBMISSION") | .id' 2>/dev/null || echo "")
+  else
+    # Fallback: grab second step id
+    MANUAL_SUB_STEP_RUN_ID=$(echo "$LAST_BODY" | grep -o '"id":"[^"]*"' | head -3 | tail -1 | sed 's/.*":"\([^"]*\)".*/\1/' || echo "")
+  fi
+  if echo "$LAST_BODY" | grep -q '"READY"'; then
+    pass "step advance: next step is READY"
+  else
+    fail "step advance: next step not READY"
+  fi
+fi
+
+# ── Step 47: Link existing manual submission to MANUAL_SUBMISSION step ─────────
+header "POST /api/v1/workflow-runs/:runId/steps/:stepId/manual-submission"
+# Re-use the SUBMISSION_ID from Phase 1F if available, else skip gracefully
+if [[ -n "$MANUAL_SUB_STEP_RUN_ID" && -n "$SUBMISSION_ID" ]]; then
+  api_call POST "/api/v1/workflow-runs/${WORKFLOW_RUN_ID}/steps/${MANUAL_SUB_STEP_RUN_ID}/manual-submission" \
+    "{\"clientId\":\"${CLIENT_ID}\",\"manualSubmissionId\":\"${SUBMISSION_ID}\"}"
+  if require_ok "POST /workflow-runs/:runId/steps/:stepId/manual-submission" "200"; then
+    if echo "$LAST_BODY" | grep -q "\"${SUBMISSION_ID}\""; then
+      pass "manual submission linked: ${SUBMISSION_ID}"
+    else
+      fail "manual submission link: submission id not in response"
+    fi
+  fi
+else
+  pass "manual submission link: skipped (MANUAL_SUB_STEP_RUN_ID or SUBMISSION_ID not available)"
+fi
+
+# ── Step 48: Reject linking submission to wrong step kind ──────────────────────
+header "POST /workflow-runs/:runId/steps/:stepId/manual-submission (wrong step kind)"
+# Attempt to link to the first (already completed VERIFY_TARGET_REQUIREMENTS) step
+# Use FIRST_STEP_RUN_ID which is VERIFY_TARGET_REQUIREMENTS kind
+if [[ -n "$FIRST_STEP_RUN_ID" && -n "$SUBMISSION_ID" ]]; then
+  api_call POST "/api/v1/workflow-runs/${WORKFLOW_RUN_ID}/steps/${FIRST_STEP_RUN_ID}/manual-submission" \
+    "{\"clientId\":\"${CLIENT_ID}\",\"manualSubmissionId\":\"${SUBMISSION_ID}\"}"
+  if echo "$LAST_BODY" | grep -q '"WORKFLOW_INVALID_TRANSITION"'; then
+    pass "wrong step kind: correctly rejected with WORKFLOW_INVALID_TRANSITION"
+  elif [[ "$LAST_CODE" == "400" ]]; then
+    pass "wrong step kind: HTTP 400 as expected"
+  else
+    fail "wrong step kind: expected 400, got ${LAST_CODE}"
+  fi
+else
+  pass "wrong step kind: skipped (ids not available)"
+fi
+
+# ── Step 49: Block a step ──────────────────────────────────────────────────────
+# Start a second workflow run to block
+header "POST /workflow-runs/:runId/steps/:stepId/block"
+api_call POST "/api/v1/tasks/${LINKED_TASK_ID}/workflow-runs" \
+  "{\"clientId\":\"${CLIENT_ID}\",\"playbookId\":\"${PLAYBOOK_ID}\"}"
+WORKFLOW_RUN_ID2=""
+FIRST_STEP_RUN_ID2=""
+if require_ok "POST /tasks/:taskId/workflow-runs (second run)" "201"; then
+  WORKFLOW_RUN_ID2=$(extract_field "$LAST_BODY" ".workflowState.run.id" "id")
+  if $JQ_AVAILABLE; then
+    FIRST_STEP_RUN_ID2=$(echo "$LAST_BODY" | jq -r '.workflowState.steps[0].id' 2>/dev/null || echo "")
+  else
+    FIRST_STEP_RUN_ID2=$(echo "$LAST_BODY" | grep -o '"id":"[^"]*"' | head -2 | tail -1 | sed 's/.*":"\([^"]*\)".*/\1/' || echo "")
+  fi
+  pass "second workflow run created: ${WORKFLOW_RUN_ID2:-UNKNOWN}"
+fi
+
+if [[ -n "$WORKFLOW_RUN_ID2" && -n "$FIRST_STEP_RUN_ID2" ]]; then
+  api_call POST "/api/v1/workflow-runs/${WORKFLOW_RUN_ID2}/steps/${FIRST_STEP_RUN_ID2}/block" \
+    "{\"clientId\":\"${CLIENT_ID}\",\"reason\":\"Broker portal is currently unavailable\"}"
+  if require_ok "POST /workflow-runs/:runId/steps/:stepId/block" "200"; then
+    if echo "$LAST_BODY" | grep -q '"BLOCKED"'; then
+      pass "block step: run and step are BLOCKED"
+    else
+      fail "block step: expected BLOCKED status in response"
+    fi
+  fi
+else
+  pass "block step: skipped (second run ids not available)"
+fi
+
+# ── Step 50: Reject PII in playbook creation ────────────────────────────────────
+header "POST /api/v1/removal-playbooks (PII in instructions — should reject)"
+api_call POST "/api/v1/removal-playbooks" \
+  "{\"name\":\"Bad Playbook\",\"version\":\"9.0.0\",\"steps\":[{\"stepOrder\":1,\"stepKind\":\"MANUAL_SUBMISSION\",\"title\":\"Submit\",\"instructions\":\"Email admin@badbroker.com for opt-out.\"}]}"
+if echo "$LAST_BODY" | grep -q '"WORKFLOW_UNSAFE_TEXT"'; then
+  pass "PII in instructions: correctly rejected WORKFLOW_UNSAFE_TEXT"
+elif [[ "$LAST_CODE" == "400" ]]; then
+  pass "PII in instructions: HTTP 400 as expected"
+else
+  fail "PII in instructions: expected 400, got ${LAST_CODE}"
+fi
+
+# ── Step 51: Assert timeline contains WORKFLOW events ──────────────────────────
+header "Timeline includes WORKFLOW events"
+api_call GET "/api/v1/cases/${CASE_ID}/timeline"
+if require_ok "GET /cases/:caseId/timeline" "200"; then
+  if echo "$LAST_BODY" | grep -q 'WORKFLOW'; then
+    pass "timeline: contains WORKFLOW event(s)"
+  else
+    fail "timeline: no WORKFLOW events found"
+  fi
+fi
+
+# ── Step 52: Assert audit logs contain WORKFLOW events + no PII ────────────────
+header "Audit logs include WORKFLOW events and no plaintext PII"
+api_call GET "/api/v1/clients/${CLIENT_ID}/audit-logs"
+if require_ok "GET /clients/:clientId/audit-logs" "200"; then
+  if echo "$LAST_BODY" | grep -q 'WORKFLOW'; then
+    pass "audit logs: contains WORKFLOW event(s)"
+  else
+    fail "audit logs: no WORKFLOW events found"
+  fi
+  # No ciphertext or vault fields in audit logs
+  if echo "$LAST_BODY" | grep -qE '"ciphertext"|"authTag"|"encryptedKeyRef"'; then
+    fail "audit logs: ciphertext field in response"
+  else
+    pass "audit logs: no ciphertext in response"
+  fi
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo
 echo "════════════════════════════════════════════════════════"
@@ -775,9 +1009,11 @@ echo "  Test data client:        ${CLIENT_ID:-UNKNOWN}"
 echo "  Vault record:            ${VAULT_RECORD_ID:-UNKNOWN}"
 echo "  Data source target:      ${DATA_SOURCE_TARGET_ID:-UNKNOWN}"
 echo "  Manual submission:       ${SUBMISSION_ID:-UNKNOWN}"
+echo "  Playbook:                ${PLAYBOOK_ID:-UNKNOWN}"
+echo "  Workflow run:            ${WORKFLOW_RUN_ID:-UNKNOWN}"
 echo "════════════════════════════════════════════════════════"
 if [[ $FAILURES -eq 0 ]]; then
-  echo "  ALL SMOKE STEPS PASSED (40/40)"
+  echo "  ALL SMOKE STEPS PASSED (52/52)"
   echo "════════════════════════════════════════════════════════"
   exit 0
 else

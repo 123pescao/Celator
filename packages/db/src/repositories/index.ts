@@ -18,3 +18,7 @@ export { IdentityVaultAccessLogRepository } from './identity-vault-access-log.re
 export { DataSourceTargetRepository } from './data-source-target.repository.js';
 export { ManualRemovalSubmissionRepository } from './manual-removal-submission.repository.js';
 export type { SubmissionMethod, SubmissionStatus } from './manual-removal-submission.repository.js';
+export { RemovalPlaybookRepository } from './removal-playbook.repository.js';
+export type { PlaybookWithSteps, PlaybookStatus, WorkflowStepKind } from './removal-playbook.repository.js';
+export { TaskWorkflowRunRepository } from './task-workflow-run.repository.js';
+export type { WorkflowRunWithSteps, WorkflowRunStatus, WorkflowStepStatus, TaskWorkflowRun, TaskWorkflowStepRun } from './task-workflow-run.repository.js';

@@ -40,3 +40,17 @@ export type {
   RecordOutcomeInput,
   SafeManualSubmission,
 } from './manual-removal-submission.service.js';
+export { WorkflowEngineService } from './workflow-engine.service.js';
+export type {
+  CreatePlaybookInput,
+  CreatePlaybookStepInput,
+  StartWorkflowInput,
+  AdvanceStepInput,
+  BlockStepInput,
+  AttachManualSubmissionInput,
+  SafePlaybook,
+  SafePlaybookStep,
+  SafePlaybookWithSteps,
+  SafeWorkflowStepRun,
+  SafeWorkflowState,
+} from './workflow-engine.service.js';

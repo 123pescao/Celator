@@ -309,6 +309,7 @@ model Client {
   dataDeletionRequests  ClientDataDeletionRequest[]
   dekRotationJobs       DekRotationJob[]
   manualSubmissions     ManualRemovalSubmission[]
+  workflowRuns          TaskWorkflowRun[]
 
   @@index([organizationId])
   @@index([status])
@@ -500,6 +501,7 @@ model CleanupTask {
   evidenceRecords  EvidenceRecord[]
   timelineEvents   CaseTimelineEvent[]   @relation("TaskTimeline")
   manualSubmissions ManualRemovalSubmission[]
+  workflowRuns     TaskWorkflowRun[]
 
   @@index([caseId, status])
   @@index([status])
@@ -737,8 +739,9 @@ model EvidenceRecord {
   retainUntil     DateTime?
   createdAt       DateTime @default(now())
 
-  task         CleanupTask            @relation(fields: [taskId], references: [id])
-  evidenceHolds SnapshotEvidenceHold[]
+  task             CleanupTask            @relation(fields: [taskId], references: [id])
+  evidenceHolds    SnapshotEvidenceHold[]
+  workflowStepRuns TaskWorkflowStepRun[]
 
   @@index([taskId])
   @@map("evidence_records")
@@ -841,6 +844,140 @@ enum SourceType {
 }
 
 // =============================================================
+// WORKFLOW ENGINE + PLAYBOOKS (Phase 2A)
+// =============================================================
+
+enum PlaybookStatus {
+  ACTIVE
+  INACTIVE
+  DEPRECATED
+}
+
+enum WorkflowRunStatus {
+  IN_PROGRESS
+  WAITING
+  BLOCKED
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum WorkflowStepStatus {
+  PENDING
+  READY
+  IN_PROGRESS
+  WAITING
+  COMPLETED
+  BLOCKED
+  SKIPPED
+  FAILED
+}
+
+enum WorkflowStepKind {
+  VERIFY_TARGET_REQUIREMENTS
+  PREPARE_REMOVAL_DRAFT
+  OPERATOR_REVIEW
+  MANUAL_SUBMISSION
+  WAIT_FOR_CONFIRMATION
+  RECORD_OUTCOME
+  VERIFY_REMOVAL
+  CLOSE_TASK
+  CUSTOM
+}
+
+model RemovalPlaybook {
+  id                 String         @id @default(cuid())
+  name               String
+  version            String
+  sourceType         SourceType?    @map("source_type")
+  dataSourceTargetId String?        @map("data_source_target_id")
+  status             PlaybookStatus @default(ACTIVE)
+  description        String?
+  createdAt          DateTime       @default(now()) @map("created_at")
+  updatedAt          DateTime       @updatedAt       @map("updated_at")
+
+  dataSourceTarget DataSourceTarget?       @relation(fields: [dataSourceTargetId], references: [id])
+  steps            RemovalPlaybookStep[]
+  workflowRuns     TaskWorkflowRun[]
+
+  @@unique([name, version])
+  @@index([status])
+  @@index([dataSourceTargetId, status])
+  @@index([sourceType, status])
+  @@map("removal_playbooks")
+}
+
+model RemovalPlaybookStep {
+  id                       String           @id @default(cuid())
+  playbookId               String           @map("playbook_id")
+  stepOrder                Int              @map("step_order")
+  stepKind                 WorkflowStepKind @map("step_kind")
+  title                    String
+  instructions             String
+  requiresApproval         Boolean          @default(false) @map("requires_approval")
+  requiresManualSubmission Boolean          @default(false) @map("requires_manual_submission")
+  requiredEvidenceType     String?          @map("required_evidence_type")
+  createdAt                DateTime         @default(now()) @map("created_at")
+  updatedAt                DateTime         @updatedAt       @map("updated_at")
+
+  playbook RemovalPlaybook        @relation(fields: [playbookId], references: [id])
+  stepRuns TaskWorkflowStepRun[]
+
+  @@unique([playbookId, stepOrder])
+  @@index([playbookId])
+  @@map("removal_playbook_steps")
+}
+
+model TaskWorkflowRun {
+  id               String            @id @default(cuid())
+  taskId           String            @map("task_id")
+  clientId         String            @map("client_id")
+  playbookId       String            @map("playbook_id")
+  status           WorkflowRunStatus @default(IN_PROGRESS)
+  currentStepOrder Int?              @map("current_step_order")
+  startedAt        DateTime?         @map("started_at")
+  completedAt      DateTime?         @map("completed_at")
+  createdAt        DateTime          @default(now()) @map("created_at")
+  updatedAt        DateTime          @updatedAt       @map("updated_at")
+
+  task     CleanupTask           @relation(fields: [taskId], references: [id])
+  client   Client                @relation(fields: [clientId], references: [id])
+  playbook RemovalPlaybook       @relation(fields: [playbookId], references: [id])
+  stepRuns TaskWorkflowStepRun[]
+
+  @@index([taskId])
+  @@index([clientId, createdAt])
+  @@index([status])
+  @@map("task_workflow_runs")
+}
+
+model TaskWorkflowStepRun {
+  id                 String             @id @default(cuid())
+  workflowRunId      String             @map("workflow_run_id")
+  playbookStepId     String             @map("playbook_step_id")
+  stepOrder          Int                @map("step_order")
+  stepKind           WorkflowStepKind   @map("step_kind")
+  status             WorkflowStepStatus @default(PENDING)
+  operatorNotes      String?            @map("operator_notes")
+  safeResultSummary  String?            @map("safe_result_summary")
+  evidenceRecordId   String?            @map("evidence_record_id")
+  manualSubmissionId String?            @map("manual_submission_id")
+  startedAt          DateTime?          @map("started_at")
+  completedAt        DateTime?          @map("completed_at")
+  createdAt          DateTime           @default(now()) @map("created_at")
+  updatedAt          DateTime           @updatedAt       @map("updated_at")
+
+  workflowRun      TaskWorkflowRun         @relation(fields: [workflowRunId], references: [id])
+  playbookStep     RemovalPlaybookStep     @relation(fields: [playbookStepId], references: [id])
+  evidenceRecord   EvidenceRecord?         @relation(fields: [evidenceRecordId], references: [id])
+  manualSubmission ManualRemovalSubmission? @relation(fields: [manualSubmissionId], references: [id])
+
+  @@index([workflowRunId])
+  @@index([workflowRunId, stepOrder])
+  @@map("task_workflow_step_runs")
+}
+
+// =============================================================
 // MANUAL REMOVAL SUBMISSIONS (Phase 1F)
 // =============================================================
 
@@ -883,6 +1020,7 @@ model ManualRemovalSubmission {
   task             CleanupTask      @relation(fields: [taskId], references: [id])
   dataSourceTarget DataSourceTarget @relation(fields: [dataSourceTargetId], references: [id])
   client           Client           @relation(fields: [clientId], references: [id])
+  workflowStepRuns TaskWorkflowStepRun[]
 
   @@index([taskId])
   @@index([clientId, createdAt])
@@ -912,6 +1050,7 @@ model DataSourceTarget {
 
   cleanupTasks            CleanupTask[]
   manualRemovalSubmissions ManualRemovalSubmission[]
+  playbooks               RemovalPlaybook[]
 
   @@index([sourceType, isActive])
   @@map("data_source_targets")
