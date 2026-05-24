@@ -33,3 +33,10 @@ export type {
   RemovalRequestDraft,
   VaultFieldStatus,
 } from './removal-request-draft.service.js';
+export { ManualRemovalSubmissionService } from './manual-removal-submission.service.js';
+export type {
+  CreateManualSubmissionInput,
+  RecordSubmittedInput,
+  RecordOutcomeInput,
+  SafeManualSubmission,
+} from './manual-removal-submission.service.js';

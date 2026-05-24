@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Celator Phase 1A/1C/1D/1E — API Workflow Smoke Test
+# Celator Phase 1A/1C/1D/1E/1F — API Workflow Smoke Test
 #
 # Exercises the full operator workflow against a running local API:
 #   health → security/status → org → user → actor-validation → client
 #   → identity verification → consent → authorization → case → task
-#   → review packet → approval → timeline (assert > 0) → audit logs (assert > 0)
-#   → vault record store (assert redacted, no plaintext) → vault list → vault access
+#   → review packet → approval → timeline → audit logs
+#   → vault record store → target registry → removal draft
+#   → manual submission → submitted → outcome → PII boundary checks
 #
 # Phase 1C: all write requests carry X-Dev-Actor-Id set to the real USER_ID
 # created in step 4. Actor validation steps assert 401/403 for missing/invalid.
@@ -14,6 +15,9 @@
 # Phase 1D: vault intake steps store fake PII (smoke test values only),
 # verify the response contains only redacted display, and verify the audit log
 # does not leak the intake value.
+#
+# Phase 1F: manual removal submissions created, marked submitted, outcome
+# recorded; all responses verified to be free of plaintext PII and ciphertext.
 #
 # No real PII. No real external submissions.
 #
@@ -64,7 +68,7 @@ ACTOR_ID=""
 # Entity IDs — pre-initialized to prevent unbound-variable exits when upstream steps fail.
 ORG_ID="" USER_ID="" CLIENT_ID="" VERIFICATION_ID="" CONSENT_VERSION_ID=""
 AUTHORIZATION_ID="" CASE_ID="" TASK_ID="" APPROVAL_REQUEST_ID=""
-VAULT_RECORD_ID="" DATA_SOURCE_TARGET_ID=""
+VAULT_RECORD_ID="" DATA_SOURCE_TARGET_ID="" SUBMISSION_ID=""
 
 # Extract a field from a JSON string.
 # Usage: extract_field <json> <jq_path> <grep_key>
@@ -629,6 +633,138 @@ if require_ok "GET /api/v1/data-source-targets/by-name/:sourceName" "200"; then
   fi
 fi
 
+# ── Step 33: Create manual submission for linked task (Phase 1F) ───────────────
+header "POST /api/v1/tasks/:taskId/manual-submissions"
+REDACTED_SUMMARY="OPT_OUT to smoke_broker — EMAIL: s***@vault.invalid"
+api_call POST "/api/v1/tasks/${LINKED_TASK_ID}/manual-submissions" \
+  "{\"clientId\":\"${CLIENT_ID}\",\"submissionMethod\":\"WEB_FORM\",\"redactedSummary\":\"${REDACTED_SUMMARY}\"}"
+SUBMISSION_ID=""
+if require_ok "POST /tasks/:taskId/manual-submissions" "201"; then
+  SUBMISSION_ID=$(extract_field "$LAST_BODY" ".submission.id" "id")
+  if [[ -n "$SUBMISSION_ID" && "$SUBMISSION_ID" != "null" ]]; then
+    pass "manual submission created: ${SUBMISSION_ID}"
+  else
+    fail "manual submission: could not extract id"
+  fi
+fi
+
+# ── Step 34: GET submissions for task ──────────────────────────────────────────
+header "GET /api/v1/tasks/:taskId/manual-submissions"
+api_call GET "/api/v1/tasks/${LINKED_TASK_ID}/manual-submissions"
+if require_ok "GET /tasks/:taskId/manual-submissions" "200"; then
+  SUB_COUNT=$(count_array "$LAST_BODY" "submissions")
+  if [[ "$SUB_COUNT" -ge 1 ]]; then
+    pass "task submissions list: ${SUB_COUNT} submission(s)"
+  else
+    fail "task submissions list: expected at least 1, got ${SUB_COUNT}"
+  fi
+fi
+
+# ── Step 35: GET submissions for client ────────────────────────────────────────
+header "GET /api/v1/clients/:clientId/manual-submissions"
+api_call GET "/api/v1/clients/${CLIENT_ID}/manual-submissions"
+if require_ok "GET /clients/:clientId/manual-submissions" "200"; then
+  CLIENT_SUB_COUNT=$(count_array "$LAST_BODY" "submissions")
+  if [[ "$CLIENT_SUB_COUNT" -ge 1 ]]; then
+    pass "client submissions list: ${CLIENT_SUB_COUNT} submission(s)"
+  else
+    fail "client submissions list: expected at least 1, got ${CLIENT_SUB_COUNT}"
+  fi
+fi
+
+# ── Step 36: Mark submission as submitted ──────────────────────────────────────
+header "POST /api/v1/manual-submissions/:submissionId/submitted"
+api_call POST "/api/v1/manual-submissions/${SUBMISSION_ID}/submitted" \
+  "{\"clientId\":\"${CLIENT_ID}\",\"confirmationCode\":\"REF-SMOKE-001\"}"
+if require_ok "POST /manual-submissions/:id/submitted" "200"; then
+  if echo "$LAST_BODY" | grep -q '"submissionStatus":"SUBMITTED"'; then
+    pass "submission status: SUBMITTED"
+  else
+    fail "submission: expected submissionStatus SUBMITTED in response"
+  fi
+  # Confirm no plaintext PII in the response
+  if echo "$LAST_BODY" | grep -q '"smoketest@vault.invalid"'; then
+    fail "submission: plaintext vault email found in response"
+  else
+    pass "submission submitted: no plaintext PII in response"
+  fi
+  if echo "$LAST_BODY" | grep -qE '"ciphertext"|"authTag"|"encryptedKeyRef"'; then
+    fail "submission submitted: ciphertext field in response"
+  else
+    pass "submission submitted: no ciphertext in response"
+  fi
+fi
+
+# ── Step 37: Record outcome — ACKNOWLEDGED ─────────────────────────────────────
+header "POST /api/v1/manual-submissions/:submissionId/outcome (ACKNOWLEDGED)"
+api_call POST "/api/v1/manual-submissions/${SUBMISSION_ID}/outcome" \
+  "{\"clientId\":\"${CLIENT_ID}\",\"status\":\"ACKNOWLEDGED\",\"operatorNotes\":\"Broker acknowledged receipt\"}"
+if require_ok "POST /manual-submissions/:id/outcome (ACKNOWLEDGED)" "200"; then
+  if echo "$LAST_BODY" | grep -q '"submissionStatus":"ACKNOWLEDGED"'; then
+    pass "outcome: submissionStatus ACKNOWLEDGED"
+  else
+    fail "outcome: expected submissionStatus ACKNOWLEDGED"
+  fi
+fi
+
+# ── Step 38: Create a second submission and record COMPLETED outcome ────────────
+header "POST /api/v1/manual-submissions/:id/outcome (COMPLETED)"
+api_call POST "/api/v1/tasks/${LINKED_TASK_ID}/manual-submissions" \
+  "{\"clientId\":\"${CLIENT_ID}\",\"submissionMethod\":\"EMAIL\",\"redactedSummary\":\"OPT_OUT to smoke_broker — EMAIL: s***@vault.invalid\"}"
+SUBMISSION_ID2=""
+if require_ok "POST /tasks/:taskId/manual-submissions (second)" "201"; then
+  SUBMISSION_ID2=$(extract_field "$LAST_BODY" ".submission.id" "id")
+  if [[ -n "$SUBMISSION_ID2" && "$SUBMISSION_ID2" != "null" ]]; then
+    pass "second submission created: ${SUBMISSION_ID2}"
+  else
+    fail "second submission: could not extract id"
+  fi
+fi
+# Mark as submitted first
+api_call POST "/api/v1/manual-submissions/${SUBMISSION_ID2}/submitted" \
+  "{\"clientId\":\"${CLIENT_ID}\"}"
+# Then record COMPLETED
+api_call POST "/api/v1/manual-submissions/${SUBMISSION_ID2}/outcome" \
+  "{\"clientId\":\"${CLIENT_ID}\",\"status\":\"COMPLETED\"}"
+if require_ok "POST /manual-submissions/:id/outcome (COMPLETED)" "200"; then
+  if echo "$LAST_BODY" | grep -q '"submissionStatus":"COMPLETED"'; then
+    pass "outcome: submissionStatus COMPLETED"
+  else
+    fail "outcome: expected submissionStatus COMPLETED"
+  fi
+fi
+
+# ── Step 39: Verify terminal status rejects further outcome ────────────────────
+header "POST /api/v1/manual-submissions/:id/outcome (terminal rejection)"
+api_call POST "/api/v1/manual-submissions/${SUBMISSION_ID2}/outcome" \
+  "{\"clientId\":\"${CLIENT_ID}\",\"status\":\"ACKNOWLEDGED\"}"
+if echo "$LAST_BODY" | grep -q '"MANUAL_SUBMISSION_INVALID_STATUS"'; then
+  pass "terminal rejection: correct error MANUAL_SUBMISSION_INVALID_STATUS"
+elif [[ "$LAST_CODE" == "400" ]]; then
+  pass "terminal rejection: HTTP 400 as expected"
+else
+  fail "terminal rejection: expected 400 for outcome on terminal submission, got ${LAST_CODE}"
+fi
+
+# ── Step 40: Assert timeline and audit logs include new submission events ───────
+header "Timeline + audit logs include manual submission events"
+api_call GET "/api/v1/cases/${CASE_ID}/timeline"
+if require_ok "GET /cases/:caseId/timeline" "200"; then
+  if echo "$LAST_BODY" | grep -q 'MANUAL_SUBMISSION'; then
+    pass "timeline: contains MANUAL_SUBMISSION event(s)"
+  else
+    fail "timeline: no MANUAL_SUBMISSION events found"
+  fi
+fi
+api_call GET "/api/v1/clients/${CLIENT_ID}/audit-logs"
+if require_ok "GET /clients/:clientId/audit-logs" "200"; then
+  if echo "$LAST_BODY" | grep -q 'MANUAL_SUBMISSION'; then
+    pass "audit logs: contains MANUAL_SUBMISSION event(s)"
+  else
+    fail "audit logs: no MANUAL_SUBMISSION events found"
+  fi
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo
 echo "════════════════════════════════════════════════════════"
@@ -638,9 +774,10 @@ echo "  Test data user:          ${USER_ID:-UNKNOWN}"
 echo "  Test data client:        ${CLIENT_ID:-UNKNOWN}"
 echo "  Vault record:            ${VAULT_RECORD_ID:-UNKNOWN}"
 echo "  Data source target:      ${DATA_SOURCE_TARGET_ID:-UNKNOWN}"
+echo "  Manual submission:       ${SUBMISSION_ID:-UNKNOWN}"
 echo "════════════════════════════════════════════════════════"
 if [[ $FAILURES -eq 0 ]]; then
-  echo "  ALL SMOKE STEPS PASSED (32/32)"
+  echo "  ALL SMOKE STEPS PASSED (40/40)"
   echo "════════════════════════════════════════════════════════"
   exit 0
 else

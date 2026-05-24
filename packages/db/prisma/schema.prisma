@@ -308,6 +308,7 @@ model Client {
   portalEvents          ClientPortalEvent[]
   dataDeletionRequests  ClientDataDeletionRequest[]
   dekRotationJobs       DekRotationJob[]
+  manualSubmissions     ManualRemovalSubmission[]
 
   @@index([organizationId])
   @@index([status])
@@ -498,6 +499,7 @@ model CleanupTask {
   highRiskFlags    HighRiskFlag[]
   evidenceRecords  EvidenceRecord[]
   timelineEvents   CaseTimelineEvent[]   @relation("TaskTimeline")
+  manualSubmissions ManualRemovalSubmission[]
 
   @@index([caseId, status])
   @@index([status])
@@ -838,6 +840,60 @@ enum SourceType {
   OTHER
 }
 
+// =============================================================
+// MANUAL REMOVAL SUBMISSIONS (Phase 1F)
+// =============================================================
+
+enum SubmissionMethod {
+  WEB_FORM
+  EMAIL
+  SUPPORT_PORTAL
+  PHONE
+  MAIL
+  OTHER
+}
+
+enum SubmissionStatus {
+  DRAFTED
+  READY_FOR_MANUAL_SUBMISSION
+  SUBMITTED
+  ACKNOWLEDGED
+  REJECTED
+  NEEDS_MORE_INFO
+  COMPLETED
+  FAILED
+}
+
+model ManualRemovalSubmission {
+  id                  String           @id @default(cuid())
+  taskId              String           @map("task_id")
+  dataSourceTargetId  String           @map("data_source_target_id")
+  clientId            String           @map("client_id")
+  submittedByUserId   String?          @map("submitted_by_user_id")
+  submissionMethod    SubmissionMethod @map("submission_method")
+  submissionStatus    SubmissionStatus @default(DRAFTED) @map("submission_status")
+  submittedAt         DateTime?        @map("submitted_at")
+  confirmationCode    String?          @map("confirmation_code")
+  confirmationUrl     String?          @map("confirmation_url")
+  operatorNotes       String?          @map("operator_notes")
+  redactedSummary     String           @map("redacted_summary")
+  createdAt           DateTime         @default(now()) @map("created_at")
+  updatedAt           DateTime         @updatedAt      @map("updated_at")
+
+  task             CleanupTask      @relation(fields: [taskId], references: [id])
+  dataSourceTarget DataSourceTarget @relation(fields: [dataSourceTargetId], references: [id])
+  client           Client           @relation(fields: [clientId], references: [id])
+
+  @@index([taskId])
+  @@index([clientId, createdAt])
+  @@index([submissionStatus])
+  @@map("manual_removal_submissions")
+}
+
+// =============================================================
+// DATA SOURCE TARGETS (Phase 1E)
+// =============================================================
+
 model DataSourceTarget {
   id                   String       @id @default(cuid())
   sourceName           String       @unique  @map("source_name")
@@ -854,7 +910,8 @@ model DataSourceTarget {
   createdAt            DateTime     @default(now())  @map("created_at")
   updatedAt            DateTime     @updatedAt       @map("updated_at")
 
-  cleanupTasks         CleanupTask[]
+  cleanupTasks            CleanupTask[]
+  manualRemovalSubmissions ManualRemovalSubmission[]
 
   @@index([sourceType, isActive])
   @@map("data_source_targets")

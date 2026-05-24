@@ -28,6 +28,7 @@ import {
   IdentityVaultRecordRepository,
   IdentityVaultAccessLogRepository,
   DataSourceTargetRepository,
+  ManualRemovalSubmissionRepository,
 } from '@celator/db';
 import { LocalKmsProvider } from '@celator/security';
 import {
@@ -43,6 +44,7 @@ import {
   IdentityVaultIntakeService,
   DataSourceTargetService,
   RemovalRequestDraftService,
+  ManualRemovalSubmissionService,
 } from '../../index.js';
 
 // ---------------------------------------------------------------------------
@@ -168,7 +170,12 @@ async function cleanupTestData(): Promise<void> {
     await db.highRiskFlag.deleteMany({ where: { clientId: { in: testClientIds } } });
   }
 
-  // 10. cleanup_tasks → cleanup_cases (caseId FK)
+  // 10a. manual_removal_submissions → cleanup_tasks (taskId FK), data_source_targets, clients
+  if (testTaskIds.length > 0) {
+    await db.manualRemovalSubmission.deleteMany({ where: { taskId: { in: testTaskIds } } });
+  }
+
+  // 10b. cleanup_tasks → cleanup_cases (caseId FK)
   if (testCaseIds.length > 0) {
     await db.cleanupTask.deleteMany({ where: { caseId: { in: testCaseIds } } });
   }
@@ -268,6 +275,10 @@ function buildTestServices() {
   const approvalRepo = new OperatorApprovalRepository(db);
   const auditRepo = new AuditLogRepository(db);
   const timelineRepo = new CaseTimelineRepository(db);
+  const vaultRecordRepo = new IdentityVaultRecordRepository(db);
+  const vaultAccessLogRepo = new IdentityVaultAccessLogRepository(db);
+  const dataSourceTargetRepo = new DataSourceTargetRepository(db);
+  const manualSubmissionRepo = new ManualRemovalSubmissionRepository(db);
 
   const audit = new AuditService(auditRepo);
   const timeline = new CaseTimelineService(timelineRepo);
@@ -278,11 +289,22 @@ function buildTestServices() {
   const caseService = new CleanupCaseService(caseRepo, audit, timeline);
   const reviewPacketService = new ReviewPacketService(snapshotRepo, requestRepo, taskRepo, authorizationRepo, audit, timeline);
   const operatorApprovalService = new OperatorApprovalService(approvalRepo, requestRepo, snapshotRepo, taskService, audit, timeline);
+  const kms = new LocalKmsProvider(
+    'integration-test-master-secret-32-chars-minimum!!',
+    'integration-test-signing-secret-32-chars-minimum!!',
+  );
+  const vaultService = new IdentityVaultIntakeService(vaultRecordRepo, vaultAccessLogRepo, kms);
+  const dataSourceTargetService = new DataSourceTargetService(dataSourceTargetRepo);
+  const removalDraftService = new RemovalRequestDraftService(dataSourceTargetRepo, vaultService);
+  const manualSubmissionService = new ManualRemovalSubmissionService(
+    manualSubmissionRepo, taskRepo, dataSourceTargetRepo, audit, timeline,
+  );
 
   return {
     orgRepo, userRepo,
     clientService, civService, consentService, caseService, taskService,
     reviewPacketService, operatorApprovalService, audit, timeline,
+    vaultService, dataSourceTargetService, removalDraftService, manualSubmissionService,
   };
 }
 
@@ -1029,5 +1051,310 @@ describe('Phase 1E data source target + removal draft (integration)', () => {
     if (!draftResult.ok) expect(draftResult.error).toBe('VALIDATION_ERROR');
 
     await db.dataSourceTarget.delete({ where: { id: targetResult.value.id } });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 1F: Manual Removal Workflow (integration)
+// ---------------------------------------------------------------------------
+
+describe('Phase 1F manual removal workflow (integration)', () => {
+  const TEST_KMS_MASTER = 'integration-test-master-secret-32-chars-minimum!!';
+  const TEST_KMS_SIGNING = 'integration-test-signing-secret-32-chars-minimum!!';
+
+  let manualSubmissionService: ManualRemovalSubmissionService;
+  let dataSourceTargetService: DataSourceTargetService;
+  let taskService: CleanupTaskService;
+  let caseService: CleanupCaseService;
+  let clientService: ClientService;
+  let civService: ClientIdentityVerificationService;
+  let consentService: ConsentWorkflowService;
+  let vaultService: IdentityVaultIntakeService;
+
+  let clientId = '';
+  let caseId = '';
+  let taskId = '';
+  let authorizationId = '';
+  let targetId = '';
+
+  beforeAll(async () => {
+    const services = buildTestServices();
+    manualSubmissionService = services.manualSubmissionService;
+    dataSourceTargetService = services.dataSourceTargetService;
+    taskService = services.taskService;
+    caseService = services.caseService;
+    clientService = services.clientService;
+    civService = services.civService;
+    consentService = services.consentService;
+
+    const kms = new LocalKmsProvider(TEST_KMS_MASTER, TEST_KMS_SIGNING);
+    const vaultRecordRepo = new IdentityVaultRecordRepository(db);
+    const vaultAccessLogRepo = new IdentityVaultAccessLogRepository(db);
+    vaultService = new IdentityVaultIntakeService(vaultRecordRepo, vaultAccessLogRepo, kms);
+  });
+
+  afterAll(async () => {
+    await cleanupTestData();
+  });
+
+  beforeEach(async () => {
+    await cleanupTestData();
+    const newOrg = await db.organization.create({ data: { name: `${TEST_PREFIX}bootstrap_org` } });
+    BOOTSTRAP_ORG_ID = newOrg.id;
+    const newUser = await db.user.create({
+      data: {
+        organization: { connect: { id: BOOTSTRAP_ORG_ID } },
+        email: `${TEST_PREFIX}actor@integration.invalid`,
+        displayName: `${TEST_PREFIX}Integration Test Actor`,
+      },
+    });
+    TEST_ACTOR_ID = newUser.id;
+
+    // Create and activate a client
+    const s = suffix();
+    const clientResult = await clientService.create({ organizationId: BOOTSTRAP_ORG_ID, displayName: `it_client_${s}` }, TEST_ACTOR_ID);
+    expect(clientResult.ok).toBe(true);
+    if (!clientResult.ok) return;
+    clientId = clientResult.value.id;
+
+    // Verify client: createRecord → attest → completeVerification
+    const civCreate = await civService.createRecord(clientId, TEST_ACTOR_ID);
+    expect(civCreate.ok).toBe(true);
+    if (!civCreate.ok) return;
+    await civService.recordOperatorAttestation(civCreate.value.id, 'Verified for Phase 1F integration test', TEST_ACTOR_ID);
+    await civService.completeVerification(civCreate.value.id, TEST_ACTOR_ID);
+
+    // Consent + authorization
+    const cvVersion = `999.1f.${s}`;
+    const cvResult = await consentService.createConsentVersion(cvVersion, 'a'.repeat(64), new Date(), undefined, TEST_ACTOR_ID);
+    expect(cvResult.ok).toBe(true);
+    if (!cvResult.ok) return;
+
+    const authResult = await consentService.createAuthorization(
+      {
+        clientId,
+        consentVersionId: cvResult.value.id,
+        authorizationType: 'SELF',
+        scopeNames: ['DATA_BROKER_OPT_OUT'],
+        jurisdiction: 'US',
+        signedAt: new Date(),
+      },
+      TEST_ACTOR_ID,
+    );
+    expect(authResult.ok).toBe(true);
+    if (!authResult.ok) return;
+    authorizationId = authResult.value.id;
+
+    // Case
+    const caseResult = await caseService.create({ clientId, authorizationId }, TEST_ACTOR_ID);
+    expect(caseResult.ok).toBe(true);
+    if (!caseResult.ok) return;
+    caseId = caseResult.value.id;
+
+    // Target
+    const targetResult = await dataSourceTargetService.create({
+      sourceName: `it_target_1f_${s}`,
+      sourceType: 'DATA_BROKER',
+      piiRequiredFields: ['EMAIL'],
+      supportedActionTypes: ['OPT_OUT'],
+    });
+    expect(targetResult.ok).toBe(true);
+    if (!targetResult.ok) return;
+    targetId = targetResult.value.id;
+
+    // Vault record for client
+    await vaultService.store({
+      clientId,
+      fieldType: 'EMAIL',
+      plaintext: `it1f_${s}@vault.invalid`,
+      purposeCode: 'PURPOSE_OPERATOR_REVIEW_PACKET',
+      actorId: TEST_ACTOR_ID,
+      actorType: 'OPERATOR',
+    });
+
+    // Task linked to target
+    const taskResult = await taskService.create(
+      { caseId, dataSourceTargetId: targetId, actionType: 'OPT_OUT', riskTier: 'STANDARD' },
+      clientId,
+      TEST_ACTOR_ID,
+    );
+    expect(taskResult.ok).toBe(true);
+    if (!taskResult.ok) return;
+    taskId = taskResult.value.id;
+  });
+
+  it('creates a manual submission for a task linked to a target', async () => {
+    const result = await manualSubmissionService.createForTask(
+      {
+        taskId,
+        clientId,
+        submissionMethod: 'WEB_FORM',
+        redactedSummary: 'OPT_OUT to it_broker — EMAIL: i***@vault.invalid',
+      },
+      TEST_ACTOR_ID,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.taskId).toBe(taskId);
+    expect(result.value.dataSourceTargetId).toBe(targetId);
+    expect(result.value.clientId).toBe(clientId);
+    expect(result.value.submissionStatus).toBe('DRAFTED');
+  });
+
+  it('marks submission as submitted and records submittedAt', async () => {
+    const createResult = await manualSubmissionService.createForTask(
+      { taskId, clientId, submissionMethod: 'WEB_FORM', redactedSummary: 'OPT_OUT — EMAIL: i***@vault.invalid' },
+      TEST_ACTOR_ID,
+    );
+    expect(createResult.ok).toBe(true);
+    if (!createResult.ok) return;
+    const submissionId = createResult.value.id;
+
+    const submitResult = await manualSubmissionService.recordSubmitted(
+      submissionId,
+      { confirmationCode: 'REF-12345' },
+      clientId,
+      TEST_ACTOR_ID,
+    );
+    expect(submitResult.ok).toBe(true);
+    if (!submitResult.ok) return;
+    expect(submitResult.value.submissionStatus).toBe('SUBMITTED');
+    expect(submitResult.value.submittedAt).not.toBeNull();
+    expect(submitResult.value.confirmationCode).toBe('REF-12345');
+  });
+
+  it('records completed outcome after submission', async () => {
+    const createResult = await manualSubmissionService.createForTask(
+      { taskId, clientId, submissionMethod: 'EMAIL', redactedSummary: 'DELETE_PERSONAL_DATA — EMAIL: i***@vault.invalid' },
+      TEST_ACTOR_ID,
+    );
+    expect(createResult.ok).toBe(true);
+    if (!createResult.ok) return;
+    const submissionId = createResult.value.id;
+
+    await manualSubmissionService.recordSubmitted(submissionId, {}, clientId, TEST_ACTOR_ID);
+    const outcomeResult = await manualSubmissionService.recordOutcome(
+      submissionId,
+      { status: 'COMPLETED', operatorNotes: 'Broker confirmed removal — no PII in this note' },
+      clientId,
+      TEST_ACTOR_ID,
+    );
+    expect(outcomeResult.ok).toBe(true);
+    if (!outcomeResult.ok) return;
+    expect(outcomeResult.value.submissionStatus).toBe('COMPLETED');
+  });
+
+  it('records acknowledged outcome', async () => {
+    const createResult = await manualSubmissionService.createForTask(
+      { taskId, clientId, submissionMethod: 'SUPPORT_PORTAL', redactedSummary: 'OPT_OUT — EMAIL: i***@vault.invalid' },
+      TEST_ACTOR_ID,
+    );
+    expect(createResult.ok).toBe(true);
+    if (!createResult.ok) return;
+    await manualSubmissionService.recordSubmitted(createResult.value.id, {}, clientId, TEST_ACTOR_ID);
+    const outcomeResult = await manualSubmissionService.recordOutcome(createResult.value.id, { status: 'ACKNOWLEDGED' }, clientId, TEST_ACTOR_ID);
+    expect(outcomeResult.ok).toBe(true);
+    if (!outcomeResult.ok) return;
+    expect(outcomeResult.value.submissionStatus).toBe('ACKNOWLEDGED');
+  });
+
+  it('rejects creating submission for task with no target', async () => {
+    // Create a task without dataSourceTargetId
+    const noTargetTask = await db.cleanupTask.create({
+      data: { case: { connect: { id: caseId } }, status: 'FOUND', matchStatus: 'NEEDS_OPERATOR_REVIEW', riskTier: 'STANDARD' },
+    });
+    const result = await manualSubmissionService.createForTask(
+      { taskId: noTargetTask.id, clientId, submissionMethod: 'WEB_FORM', redactedSummary: 'OPT_OUT — EMAIL: i***@vault.invalid' },
+      TEST_ACTOR_ID,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toBe('VALIDATION_ERROR');
+    await db.cleanupTask.delete({ where: { id: noTargetTask.id } });
+  });
+
+  it('rejects redactedSummary with plaintext PII', async () => {
+    const result = await manualSubmissionService.createForTask(
+      { taskId, clientId, submissionMethod: 'WEB_FORM', redactedSummary: 'Remove realuser@example.com from broker' },
+      TEST_ACTOR_ID,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toBe('PII_FORBIDDEN_IN_REDACTED_PREVIEW');
+  });
+
+  it('submission response contains no plaintext PII', async () => {
+    const result = await manualSubmissionService.createForTask(
+      { taskId, clientId, submissionMethod: 'WEB_FORM', redactedSummary: 'OPT_OUT — EMAIL: i***@vault.invalid' },
+      TEST_ACTOR_ID,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const json = JSON.stringify(result.value);
+    // The unredacted email prefix (it1f_) must not appear — only the redacted form i***@vault.invalid is allowed
+    expect(json).not.toMatch(/it1f_[a-z0-9_]+@vault\.invalid/);
+    // No vault internal fields
+    expect(json).not.toContain('ciphertext');
+    expect(json).not.toContain('authTag');
+    expect(json).not.toContain('encryptedKeyRef');
+  });
+
+  it('timeline events include MANUAL_SUBMISSION_CREATED and MANUAL_SUBMISSION_SUBMITTED', async () => {
+    const createResult = await manualSubmissionService.createForTask(
+      { taskId, clientId, submissionMethod: 'WEB_FORM', redactedSummary: 'OPT_OUT — EMAIL: i***@vault.invalid' },
+      TEST_ACTOR_ID,
+    );
+    expect(createResult.ok).toBe(true);
+    if (!createResult.ok) return;
+
+    await manualSubmissionService.recordSubmitted(createResult.value.id, {}, clientId, TEST_ACTOR_ID);
+
+    const events = await db.caseTimelineEvent.findMany({ where: { caseId }, orderBy: { createdAt: 'asc' } });
+    const eventTypes = events.map((e) => e.eventType);
+    expect(eventTypes).toContain('MANUAL_SUBMISSION_CREATED');
+    expect(eventTypes).toContain('MANUAL_SUBMISSION_SUBMITTED');
+  });
+
+  it('audit logs include MANUAL_SUBMISSION_CREATED and MANUAL_SUBMISSION_OUTCOME_RECORDED', async () => {
+    const createResult = await manualSubmissionService.createForTask(
+      { taskId, clientId, submissionMethod: 'WEB_FORM', redactedSummary: 'OPT_OUT — EMAIL: i***@vault.invalid' },
+      TEST_ACTOR_ID,
+    );
+    expect(createResult.ok).toBe(true);
+    if (!createResult.ok) return;
+    await manualSubmissionService.recordSubmitted(createResult.value.id, {}, clientId, TEST_ACTOR_ID);
+    await manualSubmissionService.recordOutcome(createResult.value.id, { status: 'COMPLETED' }, clientId, TEST_ACTOR_ID);
+
+    const logs = await db.auditLog.findMany({ where: { clientId }, orderBy: { createdAt: 'asc' } });
+    const logTypes = logs.map((l) => l.eventType);
+    expect(logTypes).toContain('MANUAL_SUBMISSION_CREATED');
+    expect(logTypes).toContain('MANUAL_SUBMISSION_OUTCOME_RECORDED');
+  });
+
+  it('lists submissions for task and client', async () => {
+    await manualSubmissionService.createForTask(
+      { taskId, clientId, submissionMethod: 'MAIL', redactedSummary: 'OPT_OUT — EMAIL: i***@vault.invalid' },
+      TEST_ACTOR_ID,
+    );
+    const forTask = await manualSubmissionService.listForTask(taskId);
+    expect(forTask).toHaveLength(1);
+    expect(forTask[0]?.taskId).toBe(taskId);
+
+    const forClient = await manualSubmissionService.listForClient(clientId);
+    expect(forClient).toHaveLength(1);
+    expect(forClient[0]?.clientId).toBe(clientId);
+  });
+
+  it('cannot record outcome on terminal submission', async () => {
+    const createResult = await manualSubmissionService.createForTask(
+      { taskId, clientId, submissionMethod: 'WEB_FORM', redactedSummary: 'OPT_OUT — EMAIL: i***@vault.invalid' },
+      TEST_ACTOR_ID,
+    );
+    expect(createResult.ok).toBe(true);
+    if (!createResult.ok) return;
+    await manualSubmissionService.recordSubmitted(createResult.value.id, {}, clientId, TEST_ACTOR_ID);
+    await manualSubmissionService.recordOutcome(createResult.value.id, { status: 'FAILED' }, clientId, TEST_ACTOR_ID);
+
+    const secondOutcome = await manualSubmissionService.recordOutcome(createResult.value.id, { status: 'COMPLETED' }, clientId, TEST_ACTOR_ID);
+    expect(secondOutcome.ok).toBe(false);
+    if (!secondOutcome.ok) expect(secondOutcome.error).toBe('MANUAL_SUBMISSION_INVALID_STATUS');
   });
 });

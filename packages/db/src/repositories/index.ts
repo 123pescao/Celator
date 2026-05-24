@@ -16,3 +16,5 @@ export { EmergencyPauseRepository } from './emergency-pause.repository.js';
 export { IdentityVaultRecordRepository } from './identity-vault-record.repository.js';
 export { IdentityVaultAccessLogRepository } from './identity-vault-access-log.repository.js';
 export { DataSourceTargetRepository } from './data-source-target.repository.js';
+export { ManualRemovalSubmissionRepository } from './manual-removal-submission.repository.js';
+export type { SubmissionMethod, SubmissionStatus } from './manual-removal-submission.repository.js';
