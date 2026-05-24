@@ -479,27 +479,30 @@ model CleanupCase {
 }
 
 model CleanupTask {
-  id              String      @id @default(cuid())
-  caseId          String
-  status          TaskStatus  @default(FOUND)
-  actionType      ActionType?
-  matchStatus     MatchStatus @default(NEEDS_OPERATOR_REVIEW)
-  riskTier        RiskTier    @default(STANDARD)
-  sourceRef       String?     // broker/source name
-  findingUrl      String?
-  preparedByUserId String?
-  createdAt       DateTime    @default(now())
-  updatedAt       DateTime    @updatedAt
+  id                   String      @id @default(cuid())
+  caseId               String
+  dataSourceTargetId   String?
+  status               TaskStatus  @default(FOUND)
+  actionType           ActionType?
+  matchStatus          MatchStatus @default(NEEDS_OPERATOR_REVIEW)
+  riskTier             RiskTier    @default(STANDARD)
+  sourceRef            String?     // broker/source name
+  findingUrl           String?
+  preparedByUserId     String?
+  createdAt            DateTime    @default(now())
+  updatedAt            DateTime    @updatedAt
 
-  case           CleanupCase           @relation(fields: [caseId], references: [id])
+  case             CleanupCase           @relation(fields: [caseId], references: [id])
+  dataSourceTarget DataSourceTarget?     @relation(fields: [dataSourceTargetId], references: [id])
   approvalRequests ApprovalRequest[]
-  highRiskFlags  HighRiskFlag[]
-  evidenceRecords EvidenceRecord[]
-  timelineEvents CaseTimelineEvent[]   @relation("TaskTimeline")
+  highRiskFlags    HighRiskFlag[]
+  evidenceRecords  EvidenceRecord[]
+  timelineEvents   CaseTimelineEvent[]   @relation("TaskTimeline")
 
   @@index([caseId, status])
   @@index([status])
   @@index([riskTier, status])
+  @@index([dataSourceTargetId])
   @@map("cleanup_tasks")
 }
 
@@ -850,6 +853,8 @@ model DataSourceTarget {
   isActive             Boolean      @default(true)  @map("is_active")
   createdAt            DateTime     @default(now())  @map("created_at")
   updatedAt            DateTime     @updatedAt       @map("updated_at")
+
+  cleanupTasks         CleanupTask[]
 
   @@index([sourceType, isActive])
   @@map("data_source_targets")

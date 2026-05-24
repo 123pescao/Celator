@@ -27,6 +27,7 @@ import {
   CaseTimelineRepository,
   IdentityVaultRecordRepository,
   IdentityVaultAccessLogRepository,
+  DataSourceTargetRepository,
 } from '@celator/db';
 import { LocalKmsProvider } from '@celator/security';
 import {
@@ -40,6 +41,8 @@ import {
   ReviewPacketService,
   OperatorApprovalService,
   IdentityVaultIntakeService,
+  DataSourceTargetService,
+  RemovalRequestDraftService,
 } from '../../index.js';
 
 // ---------------------------------------------------------------------------
@@ -853,5 +856,178 @@ describe('Phase 1D vault intake (integration)', () => {
     // Access logs must not contain raw phone
     const logsJson = JSON.stringify(logs);
     expect(logsJson).not.toContain('787-555-0001');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 1E: Data source target registry + removal request draft
+// ---------------------------------------------------------------------------
+
+describe('Phase 1E data source target + removal draft (integration)', () => {
+  const TEST_KMS_MASTER = 'integration-test-master-secret-32-chars-minimum!!';
+  const TEST_KMS_SIGNING = 'integration-test-signing-secret-32-chars-minimum!!';
+
+  let targetService: DataSourceTargetService;
+  let draftService: RemovalRequestDraftService;
+  let vaultService: IdentityVaultIntakeService;
+  let clientId: string;
+
+  beforeAll(async () => {
+    const targetRepo = new DataSourceTargetRepository(db);
+    const kms = new LocalKmsProvider(TEST_KMS_MASTER, TEST_KMS_SIGNING);
+    const vaultRecordRepo = new IdentityVaultRecordRepository(db);
+    const vaultAccessLogRepo = new IdentityVaultAccessLogRepository(db);
+    vaultService = new IdentityVaultIntakeService(vaultRecordRepo, vaultAccessLogRepo, kms);
+    targetService = new DataSourceTargetService(targetRepo);
+    draftService = new RemovalRequestDraftService(targetRepo, vaultService);
+  });
+
+  beforeEach(async () => {
+    // Each test gets a fresh client under a fresh org
+    const org = await db.organization.create({ data: { name: `${TEST_PREFIX}1e_org_${suffix()}` } });
+    const client = await db.client.create({
+      data: { organizationId: org.id, displayName: `${TEST_PREFIX}1e_client` },
+    });
+    clientId = client.id;
+  });
+
+  it('creates a data source target and retrieves it by ID', async () => {
+    const name = `it_broker_${suffix()}`;
+    const result = await targetService.create({
+      sourceName: name,
+      sourceType: 'DATA_BROKER',
+      baseDomain: 'test-broker.invalid',
+      piiRequiredFields: ['EMAIL', 'FULL_NAME'],
+      supportedActionTypes: ['OPT_OUT'],
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const byId = await targetService.getById(result.value.id);
+    expect(byId.ok).toBe(true);
+    if (!byId.ok) return;
+    expect(byId.value.sourceName).toBe(name);
+    expect(byId.value.piiRequiredFields).toContain('EMAIL');
+
+    // Cleanup
+    await db.dataSourceTarget.delete({ where: { id: result.value.id } });
+  });
+
+  it('lists active targets and filters by sourceType', async () => {
+    const name = `it_search_${suffix()}`;
+    const created = await targetService.create({
+      sourceName: name,
+      sourceType: 'SEARCH_ENGINE',
+      piiRequiredFields: ['URL'],
+      isActive: true,
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    const active = await targetService.listActive('SEARCH_ENGINE');
+    const found = active.find((t) => t.id === created.value.id);
+    expect(found).toBeDefined();
+
+    // Inactive targets should not appear in listActive
+    await targetService.update(created.value.id, { isActive: false });
+    const activeAfter = await targetService.listActive('SEARCH_ENGINE');
+    expect(activeAfter.find((t) => t.id === created.value.id)).toBeUndefined();
+
+    await db.dataSourceTarget.delete({ where: { id: created.value.id } });
+  });
+
+  it('generates a draft with EMAIL present and FULL_NAME missing', async () => {
+    const name = `it_broker_draft_${suffix()}`;
+    const targetResult = await targetService.create({
+      sourceName: name,
+      sourceType: 'DATA_BROKER',
+      piiRequiredFields: ['EMAIL', 'FULL_NAME'],
+      supportedActionTypes: ['OPT_OUT'],
+    });
+    expect(targetResult.ok).toBe(true);
+    if (!targetResult.ok) return;
+
+    // Store only email vault record for the client
+    await vaultService.store({
+      clientId,
+      fieldType: 'EMAIL',
+      plaintext: 'drafttest@vault.invalid',
+      purposeCode: 'PURPOSE_OPERATOR_REVIEW_PACKET',
+      actorId: TEST_ACTOR_ID || 'system',
+      actorType: 'OPERATOR',
+    });
+
+    const draftResult = await draftService.buildDraft({ clientId, dataSourceTargetId: targetResult.value.id });
+    expect(draftResult.ok).toBe(true);
+    if (!draftResult.ok) return;
+
+    const draft = draftResult.value;
+    expect(draft.targetName).toBe(name);
+    expect(draft.requiredFields).toContain('EMAIL');
+    expect(draft.requiredFields).toContain('FULL_NAME');
+    expect(draft.missingFields).toContain('FULL_NAME');
+    expect(draft.missingFields).not.toContain('EMAIL');
+    expect(draft.isReadyForReview).toBe(false);
+
+    // Email is present with redacted display
+    const emailStatus = draft.vaultFieldStatuses.find((s) => s.fieldType === 'EMAIL');
+    expect(emailStatus?.isPresent).toBe(true);
+    expect(emailStatus?.redactedDisplay).toBe('d***@vault.invalid');
+
+    // No plaintext in draft
+    const json = JSON.stringify(draft);
+    expect(json).not.toContain('drafttest');
+    // No ciphertext fields
+    expect(json).not.toContain('ciphertext');
+
+    await db.dataSourceTarget.delete({ where: { id: targetResult.value.id } });
+  });
+
+  it('draft is ready for review when all required vault fields are present', async () => {
+    const name = `it_broker_ready_${suffix()}`;
+    const targetResult = await targetService.create({
+      sourceName: name,
+      sourceType: 'DATA_BROKER',
+      piiRequiredFields: ['EMAIL'],
+      supportedActionTypes: ['OPT_OUT'],
+    });
+    expect(targetResult.ok).toBe(true);
+    if (!targetResult.ok) return;
+
+    await vaultService.store({
+      clientId,
+      fieldType: 'EMAIL',
+      plaintext: 'ready@vault.invalid',
+      purposeCode: 'PURPOSE_OPERATOR_REVIEW_PACKET',
+      actorId: TEST_ACTOR_ID || 'system',
+      actorType: 'OPERATOR',
+    });
+
+    const draftResult = await draftService.buildDraft({ clientId, dataSourceTargetId: targetResult.value.id });
+    expect(draftResult.ok).toBe(true);
+    if (!draftResult.ok) return;
+
+    expect(draftResult.value.isReadyForReview).toBe(true);
+    expect(draftResult.value.missingFields).toHaveLength(0);
+
+    await db.dataSourceTarget.delete({ where: { id: targetResult.value.id } });
+  });
+
+  it('rejects draft for inactive target', async () => {
+    const name = `it_broker_inactive_${suffix()}`;
+    const targetResult = await targetService.create({
+      sourceName: name,
+      sourceType: 'DATA_BROKER',
+      piiRequiredFields: ['EMAIL'],
+      isActive: false,
+    });
+    expect(targetResult.ok).toBe(true);
+    if (!targetResult.ok) return;
+
+    const draftResult = await draftService.buildDraft({ clientId, dataSourceTargetId: targetResult.value.id });
+    expect(draftResult.ok).toBe(false);
+    if (!draftResult.ok) expect(draftResult.error).toBe('VALIDATION_ERROR');
+
+    await db.dataSourceTarget.delete({ where: { id: targetResult.value.id } });
   });
 });

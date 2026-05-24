@@ -1,4 +1,4 @@
-import type { PrismaClient, DataSourceTarget, SourceType, ActionType } from '../../generated/client/index.js';
+import type { PrismaClient, DataSourceTarget, SourceType, ActionType, Prisma } from '../../generated/client/index.js';
 
 export class DataSourceTargetRepository {
   constructor(private readonly prisma: PrismaClient) {}
@@ -46,6 +46,17 @@ export class DataSourceTargetRepository {
       where: { isActive: true, ...(sourceType ? { sourceType } : {}) },
       orderBy: { sourceName: 'asc' },
     });
+  }
+
+  async list(isActive?: boolean): Promise<DataSourceTarget[]> {
+    return this.prisma.dataSourceTarget.findMany({
+      ...(isActive !== undefined ? { where: { isActive } } : {}),
+      orderBy: { sourceName: 'asc' },
+    });
+  }
+
+  async update(id: string, data: Prisma.DataSourceTargetUpdateInput): Promise<DataSourceTarget> {
+    return this.prisma.dataSourceTarget.update({ where: { id }, data });
   }
 
   async setActive(id: string, isActive: boolean): Promise<DataSourceTarget> {

@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Celator Phase 1A/1C — API Workflow Smoke Test
+# Celator Phase 1A/1C/1D/1E — API Workflow Smoke Test
 #
 # Exercises the full operator workflow against a running local API:
 #   health → security/status → org → user → actor-validation → client
 #   → identity verification → consent → authorization → case → task
 #   → review packet → approval → timeline (assert > 0) → audit logs (assert > 0)
+#   → vault record store (assert redacted, no plaintext) → vault list → vault access
 #
 # Phase 1C: all write requests carry X-Dev-Actor-Id set to the real USER_ID
 # created in step 4. Actor validation steps assert 401/403 for missing/invalid.
+#
+# Phase 1D: vault intake steps store fake PII (smoke test values only),
+# verify the response contains only redacted display, and verify the audit log
+# does not leak the intake value.
 #
 # No real PII. No real external submissions.
 #
@@ -59,6 +64,7 @@ ACTOR_ID=""
 # Entity IDs — pre-initialized to prevent unbound-variable exits when upstream steps fail.
 ORG_ID="" USER_ID="" CLIENT_ID="" VERIFICATION_ID="" CONSENT_VERSION_ID=""
 AUTHORIZATION_ID="" CASE_ID="" TASK_ID="" APPROVAL_REQUEST_ID=""
+VAULT_RECORD_ID="" DATA_SOURCE_TARGET_ID=""
 
 # Extract a field from a JSON string.
 # Usage: extract_field <json> <jq_path> <grep_key>
@@ -443,16 +449,198 @@ else
   pass "no stack traces in error responses"
 fi
 
+# ── Step 23: Vault — store a fake email (Phase 1D) ───────────────────────────
+header "POST /api/v1/clients/:clientId/vault-records (store fake email)"
+# Use a clearly fake value — not real PII
+api_call POST "/api/v1/clients/${CLIENT_ID}/vault-records" \
+  "{\"fieldType\":\"EMAIL\",\"value\":\"smoketest@vault.invalid\",\"purposeCode\":\"PURPOSE_OPERATOR_REVIEW_PACKET\"}"
+if require_ok "POST /api/v1/clients/:id/vault-records" "201"; then
+  VAULT_RECORD_ID=$(extract_field "$LAST_BODY" ".record.id" "id")
+  VAULT_REDACTED=$(extract_field "$LAST_BODY" ".record.redactedDisplay" "redactedDisplay")
+  if [[ -n "$VAULT_RECORD_ID" && "$VAULT_RECORD_ID" != "null" ]]; then
+    pass "vault record created: ${VAULT_RECORD_ID}"
+  else
+    fail "vault: could not extract record.id"
+    echo "$LAST_BODY"
+  fi
+  # Response must contain redacted display, not plaintext
+  if echo "$LAST_BODY" | grep -q '"smoketest@vault.invalid"'; then
+    fail "vault store: response contains plaintext email (should be redacted)"
+  else
+    pass "vault store: no plaintext in response"
+  fi
+  if [[ -n "$VAULT_REDACTED" && "$VAULT_REDACTED" != "null" ]]; then
+    pass "vault store: redactedDisplay = ${VAULT_REDACTED}"
+  else
+    fail "vault store: missing redactedDisplay in response"
+  fi
+fi
+
+# ── Step 24: Vault — list metadata (no plaintext, no ciphertext) ─────────────
+header "GET /api/v1/clients/:clientId/vault-records"
+api_call GET "/api/v1/clients/${CLIENT_ID}/vault-records"
+if require_ok "GET /api/v1/clients/:id/vault-records" "200"; then
+  VAULT_COUNT=$(count_array "$LAST_BODY" "records")
+  if [[ "${VAULT_COUNT:-0}" -gt 0 ]]; then
+    pass "vault list: ${VAULT_COUNT} record(s)"
+  else
+    fail "vault list: expected at least 1 record, got ${VAULT_COUNT:-0}"
+  fi
+  # Must not expose plaintext or ciphertext
+  if echo "$LAST_BODY" | grep -q '"smoketest@vault.invalid"'; then
+    fail "vault list: plaintext email found in response"
+  else
+    pass "vault list: no plaintext email in response"
+  fi
+  if echo "$LAST_BODY" | grep -q '"ciphertext"'; then
+    fail "vault list: ciphertext field leaked in response"
+  else
+    pass "vault list: no ciphertext field in response"
+  fi
+fi
+
+# ── Step 25: Vault — log an access event ─────────────────────────────────────
+header "POST /api/v1/vault-records/:recordId/access"
+api_call POST "/api/v1/vault-records/${VAULT_RECORD_ID}/access" \
+  "{\"purposeCode\":\"PURPOSE_FORM_FILL\",\"reason\":\"Smoke test access log\"}"
+if require_ok "POST /api/v1/vault-records/:id/access" "200"; then
+  ACCESS_REDACTED=$(extract_field "$LAST_BODY" ".access.redactedDisplay" "redactedDisplay")
+  ACCESS_PURPOSE=$(extract_field "$LAST_BODY" ".access.purposeCode" "purposeCode")
+  if [[ "$ACCESS_PURPOSE" == "PURPOSE_FORM_FILL" ]]; then
+    pass "vault access: purposeCode=PURPOSE_FORM_FILL"
+  else
+    fail "vault access: unexpected purposeCode: ${ACCESS_PURPOSE}"
+  fi
+  if echo "$LAST_BODY" | grep -q '"smoketest@vault.invalid"'; then
+    fail "vault access: plaintext email found in response"
+  else
+    pass "vault access: no plaintext in response"
+  fi
+  pass "vault access: redactedDisplay = ${ACCESS_REDACTED}"
+fi
+
+# ── Step 26: Create data source target (Phase 1E) ─────────────────────────────
+header "POST /api/v1/data-source-targets"
+DST_NAME="smoke_broker_${SUFFIX}"
+api_call POST "/api/v1/data-source-targets" \
+  "{\"sourceName\":\"${DST_NAME}\",\"sourceType\":\"DATA_BROKER\",\"baseDomain\":\"smoke-broker.invalid\",\"piiRequiredFields\":[\"EMAIL\",\"FULL_NAME\"],\"supportedActionTypes\":[\"OPT_OUT\"]}"
+if require_ok "POST /api/v1/data-source-targets" "201"; then
+  DATA_SOURCE_TARGET_ID=$(extract_field "$LAST_BODY" ".target.id" "id")
+  if [[ -n "$DATA_SOURCE_TARGET_ID" && "$DATA_SOURCE_TARGET_ID" != "null" ]]; then
+    pass "data source target created: ${DATA_SOURCE_TARGET_ID}"
+  else
+    fail "data source target: could not extract id from response"
+  fi
+fi
+
+# ── Step 27: Get target by ID ──────────────────────────────────────────────────
+header "GET /api/v1/data-source-targets/:targetId"
+api_call GET "/api/v1/data-source-targets/${DATA_SOURCE_TARGET_ID}"
+if require_ok "GET /api/v1/data-source-targets/:id" "200"; then
+  GOT_NAME=$(extract_field "$LAST_BODY" ".target.sourceName" "sourceName")
+  if [[ "$GOT_NAME" == "$DST_NAME" ]]; then
+    pass "target getById: sourceName matches"
+  else
+    fail "target getById: unexpected sourceName: ${GOT_NAME}"
+  fi
+fi
+
+# ── Step 28: List active targets (Phase 1E) ────────────────────────────────────
+header "GET /api/v1/data-source-targets"
+api_call GET "/api/v1/data-source-targets"
+if require_ok "GET /api/v1/data-source-targets" "200"; then
+  TARGET_COUNT=$(count_array "$LAST_BODY" "targets")
+  if [[ "$TARGET_COUNT" -ge 1 ]]; then
+    pass "target list: ${TARGET_COUNT} active target(s)"
+  else
+    fail "target list: expected at least 1 active target, got ${TARGET_COUNT}"
+  fi
+fi
+
+# ── Step 29: PATCH — deactivate then re-activate target ───────────────────────
+header "PATCH /api/v1/data-source-targets/:targetId"
+api_call PATCH "/api/v1/data-source-targets/${DATA_SOURCE_TARGET_ID}" \
+  "{\"isActive\":false}"
+if require_ok "PATCH /api/v1/data-source-targets/:id (deactivate)" "200"; then
+  if echo "$LAST_BODY" | grep -q '"isActive":false'; then
+    pass "target patch: isActive=false"
+  else
+    fail "target patch: expected isActive=false in response body"
+  fi
+fi
+# Re-activate for subsequent steps
+api_call PATCH "/api/v1/data-source-targets/${DATA_SOURCE_TARGET_ID}" \
+  "{\"isActive\":true}"
+
+# ── Step 30: Create task linked to data source target (Phase 1E) ───────────────
+header "POST /api/v1/tasks (with dataSourceTargetId)"
+api_call POST "/api/v1/tasks" \
+  "{\"caseId\":\"${CASE_ID}\",\"clientId\":\"${CLIENT_ID}\",\"dataSourceTargetId\":\"${DATA_SOURCE_TARGET_ID}\",\"sourceRef\":\"smoke-broker\",\"riskTier\":\"STANDARD\"}"
+LINKED_TASK_ID=""
+if require_ok "POST /api/v1/tasks (linked to target)" "201"; then
+  LINKED_TASK_ID=$(extract_field "$LAST_BODY" ".task.id" "id")
+  if [[ -n "$LINKED_TASK_ID" && "$LINKED_TASK_ID" != "null" ]]; then
+    pass "linked task created: ${LINKED_TASK_ID}"
+  else
+    fail "linked task: could not extract id"
+  fi
+fi
+
+# ── Step 31: Generate removal request draft (Phase 1E) ─────────────────────────
+header "POST /api/v1/clients/:clientId/removal-drafts"
+api_call POST "/api/v1/clients/${CLIENT_ID}/removal-drafts" \
+  "{\"dataSourceTargetId\":\"${DATA_SOURCE_TARGET_ID}\"}"
+if require_ok "POST /api/v1/clients/:clientId/removal-drafts" "200"; then
+  DRAFT_TARGET_ID=$(extract_field "$LAST_BODY" ".draft.targetId" "targetId")
+  if [[ "$DRAFT_TARGET_ID" == "$DATA_SOURCE_TARGET_ID" ]]; then
+    pass "removal draft: targetId matches"
+  else
+    fail "removal draft: unexpected targetId: ${DRAFT_TARGET_ID}"
+  fi
+  # Draft should NOT contain plaintext email used in vault step
+  if echo "$LAST_BODY" | grep -q '"smoketest@vault.invalid"'; then
+    fail "removal draft: plaintext email found in draft response"
+  else
+    pass "removal draft: no plaintext PII in response"
+  fi
+  # Draft should NOT contain ciphertext fields
+  if echo "$LAST_BODY" | grep -qE '"ciphertext"|"authTag"|"encryptedKeyRef"'; then
+    fail "removal draft: ciphertext field found in response"
+  else
+    pass "removal draft: no ciphertext fields in response"
+  fi
+  if echo "$LAST_BODY" | grep -qE '"isReadyForReview":true|"isReadyForReview":false'; then
+    pass "removal draft: isReadyForReview field present"
+  else
+    fail "removal draft: isReadyForReview field missing from response"
+  fi
+fi
+
+# ── Step 32: Get target by name (Phase 1E) ─────────────────────────────────────
+header "GET /api/v1/data-source-targets/by-name/:sourceName"
+ENCODED_NAME=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${DST_NAME}'))" 2>/dev/null || echo "${DST_NAME}")
+api_call GET "/api/v1/data-source-targets/by-name/${ENCODED_NAME}"
+if require_ok "GET /api/v1/data-source-targets/by-name/:sourceName" "200"; then
+  BY_NAME_ID=$(extract_field "$LAST_BODY" ".target.id" "id")
+  if [[ "$BY_NAME_ID" == "$DATA_SOURCE_TARGET_ID" ]]; then
+    pass "target by-name: id matches"
+  else
+    fail "target by-name: unexpected id: ${BY_NAME_ID}"
+  fi
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo
 echo "════════════════════════════════════════════════════════"
-echo "  Smoke test suffix: ${SUFFIX}"
-echo "  Test data org:     ${ORG_ID:-UNKNOWN}"
-echo "  Test data user:    ${USER_ID:-UNKNOWN}"
-echo "  Test data client:  ${CLIENT_ID:-UNKNOWN}"
+echo "  Smoke test suffix:       ${SUFFIX}"
+echo "  Test data org:           ${ORG_ID:-UNKNOWN}"
+echo "  Test data user:          ${USER_ID:-UNKNOWN}"
+echo "  Test data client:        ${CLIENT_ID:-UNKNOWN}"
+echo "  Vault record:            ${VAULT_RECORD_ID:-UNKNOWN}"
+echo "  Data source target:      ${DATA_SOURCE_TARGET_ID:-UNKNOWN}"
 echo "════════════════════════════════════════════════════════"
 if [[ $FAILURES -eq 0 ]]; then
-  echo "  ALL SMOKE STEPS PASSED (22/22)"
+  echo "  ALL SMOKE STEPS PASSED (32/32)"
   echo "════════════════════════════════════════════════════════"
   exit 0
 else

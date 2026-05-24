@@ -17,6 +17,7 @@ const CreateCaseBody = z.object({
 const CreateTaskBody = z.object({
   caseId: z.string().min(1),
   clientId: z.string().min(1),
+  dataSourceTargetId: z.string().optional(),
   sourceRef: z.string().optional(),
   findingUrl: z.string().url().optional(),
   actionType: z.string().optional(),

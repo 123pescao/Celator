@@ -12,6 +12,7 @@ import type { CaseTimelineService } from '../services/case-timeline.service.js';
 const FAKE_TASK = {
   id: 'task_001',
   caseId: 'case_001',
+  dataSourceTargetId: null,
   status: 'READY_FOR_OPERATOR_REVIEW' as const,
   matchStatus: 'CONFIRMED_MATCH' as const,
   riskTier: 'STANDARD' as const,
@@ -166,6 +167,56 @@ describe('ReviewPacketService', () => {
       const result = await svc.getActivePacket('task_001');
       expect(result.ok).toBe(false);
       if (!result.ok) expect(result.error).toBe('SNAPSHOT_NOT_FOUND');
+    });
+  });
+
+  describe('redactedPreview PII enforcement (Phase 1D)', () => {
+    it('rejects raw email in redactedPreview', async () => {
+      const result = await svc.create(
+        { taskId: 'task_001', authorizationId: 'auth_001', redactedPreview: 'Contact user@example.com for removal' },
+        'client_001',
+        'op_001',
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('PII_FORBIDDEN_IN_REDACTED_PREVIEW');
+    });
+
+    it('rejects phone with separators in redactedPreview', async () => {
+      const result = await svc.create(
+        { taskId: 'task_001', authorizationId: 'auth_001', redactedPreview: 'Call 555-123-4567' },
+        'client_001',
+        'op_001',
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('PII_FORBIDDEN_IN_REDACTED_PREVIEW');
+    });
+
+    it('accepts safe redacted preview', async () => {
+      const result = await svc.create(
+        { taskId: 'task_001', authorizationId: 'auth_001', redactedPreview: 'Opt-out for Acxiom — client clh001' },
+        'client_001',
+        'op_001',
+      );
+      expect(result.ok).toBe(true);
+    });
+
+    it('accepts preview with redacted tokens', async () => {
+      const result = await svc.create(
+        { taskId: 'task_001', authorizationId: 'auth_001', redactedPreview: 'Email: j***@example.com — broker: acxiom' },
+        'client_001',
+        'op_001',
+      );
+      expect(result.ok).toBe(true);
+    });
+
+    it('accepts preview with hash and version strings', async () => {
+      const hash = 'abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd';
+      const result = await svc.create(
+        { taskId: 'task_001', authorizationId: 'auth_001', redactedPreview: `Hash: ${hash}, Version: 999.177947.6851` },
+        'client_001',
+        'op_001',
+      );
+      expect(result.ok).toBe(true);
     });
   });
 

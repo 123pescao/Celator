@@ -15,3 +15,21 @@ export { ReviewPacketService } from './review-packet.service.js';
 export type { CreateReviewPacketInput, ReviewPacketResult } from './review-packet.service.js';
 export { OperatorApprovalService } from './operator-approval.service.js';
 export type { RecordDecisionInput } from './operator-approval.service.js';
+export { IdentityVaultIntakeService } from './identity-vault-intake.service.js';
+export type {
+  VaultStoreInput,
+  VaultStoreResult,
+  VaultRecordMetadata,
+  VaultAccessResult,
+} from './identity-vault-intake.service.js';
+export { DataSourceTargetService } from './data-source-target.service.js';
+export type {
+  CreateDataSourceTargetInput,
+  UpdateDataSourceTargetInput,
+} from './data-source-target.service.js';
+export { RemovalRequestDraftService } from './removal-request-draft.service.js';
+export type {
+  RemovalRequestDraftInput,
+  RemovalRequestDraft,
+  VaultFieldStatus,
+} from './removal-request-draft.service.js';

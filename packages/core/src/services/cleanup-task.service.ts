@@ -9,6 +9,7 @@ import type { CaseTimelineService } from './case-timeline.service.js';
 
 export interface CreateTaskInput {
   caseId: string;
+  dataSourceTargetId?: string;
   sourceRef?: string;
   findingUrl?: string;
   actionType?: ActionType;
@@ -29,6 +30,9 @@ export class CleanupTaskService {
   async create(input: CreateTaskInput, clientId: string, actorId: string): Promise<Result<CleanupTask, ErrorCode>> {
     const task = await this.repo.create({
       case: { connect: { id: input.caseId } },
+      ...(input.dataSourceTargetId !== undefined
+        ? { dataSourceTarget: { connect: { id: input.dataSourceTargetId } } }
+        : {}),
       sourceRef: input.sourceRef ?? null,
       findingUrl: input.findingUrl ?? null,
       actionType: input.actionType ?? null,
@@ -46,7 +50,11 @@ export class CleanupTaskService {
       resourceId: task.id,
       resourceType: 'CleanupTask',
       outcome: 'ALLOWED',
-      metadata: { sourceRef: input.sourceRef, riskTier: input.riskTier },
+      metadata: {
+        sourceRef: input.sourceRef,
+        riskTier: input.riskTier,
+        dataSourceTargetId: input.dataSourceTargetId,
+      },
     });
     if (!auditResult.ok) return auditResult;
 

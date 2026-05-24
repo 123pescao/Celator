@@ -85,6 +85,80 @@ describe('AuditService', () => {
     });
   });
 
+  describe('false-positive avoidance (Phase 1D)', () => {
+    it('allows Unix timestamp value (10 digits, no separators)', async () => {
+      const result = await svc.write({
+        eventType: 'TEST',
+        actorType: 'SYSTEM',
+        outcome: 'ALLOWED',
+        metadata: { ts: 1699999999 },
+      });
+      expect(result.ok).toBe(true);
+    });
+
+    it('allows timestamp string without separators', async () => {
+      const result = await svc.write({
+        eventType: 'TEST',
+        actorType: 'SYSTEM',
+        outcome: 'ALLOWED',
+        metadata: { createdAt: '1699999999' },
+      });
+      expect(result.ok).toBe(true);
+    });
+
+    it('allows 64-character hex documentHash', async () => {
+      const hash = 'abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd';
+      const result = await svc.write({
+        eventType: 'CONSENT_CREATED',
+        actorType: 'OPERATOR',
+        outcome: 'ALLOWED',
+        metadata: { documentHash: hash },
+      });
+      expect(result.ok).toBe(true);
+    });
+
+    it('allows semver-style version string (smoke script format)', async () => {
+      const result = await svc.write({
+        eventType: 'CONSENT_CREATED',
+        actorType: 'OPERATOR',
+        outcome: 'ALLOWED',
+        metadata: { version: '999.177947.6851' },
+      });
+      expect(result.ok).toBe(true);
+    });
+
+    it('rejects raw email even with a non-PII key name', async () => {
+      const result = await svc.write({
+        eventType: 'TEST',
+        actorType: 'SYSTEM',
+        outcome: 'ALLOWED',
+        metadata: { info: 'user@example.com' },
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('AUDIT_LOG_FAILED');
+    });
+
+    it('rejects phone number with separators', async () => {
+      const result = await svc.write({
+        eventType: 'TEST',
+        actorType: 'SYSTEM',
+        outcome: 'ALLOWED',
+        metadata: { contact: '555-123-4567' },
+      });
+      expect(result.ok).toBe(false);
+    });
+
+    it('rejects token/secret key names', async () => {
+      const result = await svc.write({
+        eventType: 'TEST',
+        actorType: 'SYSTEM',
+        outcome: 'ALLOWED',
+        metadata: { token: 'abc123' },
+      });
+      expect(result.ok).toBe(false);
+    });
+  });
+
   describe('list methods', () => {
     it('delegates listByClient to repo', async () => {
       await svc.listByClient('c1', 50);

@@ -13,3 +13,6 @@ export { AuditLogRepository } from './audit-log.repository.js';
 export { CaseTimelineRepository } from './case-timeline.repository.js';
 export { EvidenceRecordRepository } from './evidence-record.repository.js';
 export { EmergencyPauseRepository } from './emergency-pause.repository.js';
+export { IdentityVaultRecordRepository } from './identity-vault-record.repository.js';
+export { IdentityVaultAccessLogRepository } from './identity-vault-access-log.repository.js';
+export { DataSourceTargetRepository } from './data-source-target.repository.js';

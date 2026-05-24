@@ -19,6 +19,9 @@ import {
   AuditLogRepository,
   CaseTimelineRepository,
   EvidenceRecordRepository,
+  IdentityVaultRecordRepository,
+  IdentityVaultAccessLogRepository,
+  DataSourceTargetRepository,
 } from '@celator/db';
 import {
   AuditService,
@@ -30,7 +33,11 @@ import {
   CleanupTaskService,
   ReviewPacketService,
   OperatorApprovalService,
+  IdentityVaultIntakeService,
+  DataSourceTargetService,
+  RemovalRequestDraftService,
 } from '@celator/core';
+import { getKmsProvider } from '@celator/security';
 
 // eslint-disable-next-line @typescript-eslint/explicit-function-return-type
 export function buildServices() {
@@ -51,6 +58,9 @@ export function buildServices() {
   const auditRepo = new AuditLogRepository(db);
   const timelineRepo = new CaseTimelineRepository(db);
   const evidenceRepo = new EvidenceRecordRepository(db);
+  const vaultRecordRepo = new IdentityVaultRecordRepository(db);
+  const vaultAccessLogRepo = new IdentityVaultAccessLogRepository(db);
+  const dataSourceTargetRepo = new DataSourceTargetRepository(db);
 
   // Services
   const audit = new AuditService(auditRepo);
@@ -84,9 +94,13 @@ export function buildServices() {
     timeline,
   );
 
+  const vaultService = new IdentityVaultIntakeService(vaultRecordRepo, vaultAccessLogRepo, getKmsProvider());
+  const dataSourceTargetService = new DataSourceTargetService(dataSourceTargetRepo);
+  const removalDraftService = new RemovalRequestDraftService(dataSourceTargetRepo, vaultService);
+
   return {
-    repos: { orgRepo, userRepo, clientRepo, civRepo, consentVersionRepo, authorizationRepo, caseRepo, taskRepo, snapshotRepo, requestRepo, approvalRepo, auditRepo, timelineRepo, evidenceRepo },
-    services: { audit, timeline, clientService, civService, consentService, caseService, taskService, reviewPacketService, operatorApprovalService },
+    repos: { orgRepo, userRepo, clientRepo, civRepo, consentVersionRepo, authorizationRepo, caseRepo, taskRepo, snapshotRepo, requestRepo, approvalRepo, auditRepo, timelineRepo, evidenceRepo, vaultRecordRepo, vaultAccessLogRepo, dataSourceTargetRepo },
+    services: { audit, timeline, clientService, civService, consentService, caseService, taskService, reviewPacketService, operatorApprovalService, vaultService, dataSourceTargetService, removalDraftService },
   };
 }
 

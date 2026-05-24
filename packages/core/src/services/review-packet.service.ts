@@ -6,6 +6,7 @@ import type {
   ClientAuthorizationRepository,
 } from '@celator/db';
 import type { ApprovalRequest } from '@celator/db';
+import { checkRedactedPreview } from '@celator/security';
 import { ok, err } from '../result.js';
 import type { Result } from '../result.js';
 import type { ErrorCode } from '../errors.js';
@@ -42,6 +43,11 @@ export class ReviewPacketService {
     clientId: string,
     actorId: string,
   ): Promise<Result<ReviewPacketResult, ErrorCode>> {
+    const previewViolation = checkRedactedPreview(input.redactedPreview);
+    if (previewViolation) {
+      return err('PII_FORBIDDEN_IN_REDACTED_PREVIEW', `redactedPreview rejected: ${previewViolation}`);
+    }
+
     const task = await this.taskRepo.findById(input.taskId);
     if (!task) return err('NOT_FOUND', `Task ${input.taskId} not found`);
 

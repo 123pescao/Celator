@@ -1,5 +1,6 @@
 import type { AuditLogRepository } from '@celator/db';
 import type { AuditLog, ActorType, Prisma } from '@celator/db';
+import { checkAuditMetadata } from '@celator/security';
 import { ok, err } from '../result.js';
 import type { Result } from '../result.js';
 import type { ErrorCode } from '../errors.js';
@@ -20,11 +21,12 @@ export class AuditService {
   constructor(private readonly repo: AuditLogRepository) {}
 
   async write(input: AuditEventInput): Promise<Result<AuditLog, ErrorCode>> {
-    // Fail-closed: if metadata contains string values that look like PII patterns, reject
+    // Fail-closed: reject metadata that contains PII field names or PII value patterns.
+    // Field-aware check: avoids false-positives on timestamps, hex hashes, CUIDs, and semver.
     if (input.metadata) {
-      const raw = JSON.stringify(input.metadata);
-      if (containsPiiPattern(raw)) {
-        return err('AUDIT_LOG_FAILED', 'Audit metadata failed PII pattern check — log rejected to prevent PII exposure');
+      const violation = checkAuditMetadata(input.metadata);
+      if (violation) {
+        return err('AUDIT_LOG_FAILED', `Audit metadata failed PII policy check: ${violation}`);
       }
     }
 
@@ -59,12 +61,3 @@ export class AuditService {
   }
 }
 
-const PII_PATTERNS = [
-  /@[a-z0-9.-]+\.[a-z]{2,}/i,       // email-like
-  /\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/, // phone-like
-  /\b\d{3}-\d{2}-\d{4}\b/,           // SSN-like
-];
-
-function containsPiiPattern(s: string): boolean {
-  return PII_PATTERNS.some((p) => p.test(s));
-}

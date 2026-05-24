@@ -1,5 +1,6 @@
 export * from './kms/index.js';
 export * from './vault/index.js';
+export * from './pii/index.js';
 export * from './approval/index.js';
 export * from './consent/index.js';
 export * from './gate/index.js';

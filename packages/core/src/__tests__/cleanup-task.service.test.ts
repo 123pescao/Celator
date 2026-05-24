@@ -7,6 +7,7 @@ import type { CaseTimelineService } from '../services/case-timeline.service.js';
 const FAKE_TASK = {
   id: 'task_001',
   caseId: 'case_001',
+  dataSourceTargetId: null,
   status: 'FOUND' as const,
   matchStatus: 'NEEDS_OPERATOR_REVIEW' as const,
   riskTier: 'STANDARD' as const,
