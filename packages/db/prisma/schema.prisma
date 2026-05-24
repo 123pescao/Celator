@@ -396,17 +396,19 @@ model ConsentScopeMapping {
 // =============================================================
 
 model IdentityVaultRecord {
-  id              String   @id @default(cuid())
-  clientId        String
-  fieldType       String   // e.g. "EMAIL", "PHONE", "ADDRESS", "DOB", "USERNAME"
-  ciphertext      String   // Base64-encoded AES-256-GCM ciphertext
-  iv              String   // Base64-encoded IV
-  authTag         String   // Base64-encoded GCM auth tag
-  keyId           String   // KMS DEK key identifier (not the key itself)
-  keyVersion      String
-  isCryptoShredded Boolean @default(false)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id               String   @id @default(cuid())
+  clientId         String
+  fieldType        String   // e.g. "EMAIL", "PHONE", "ADDRESS", "DOB", "USERNAME"
+  ciphertext       String   // Base64-encoded AES-256-GCM ciphertext
+  iv               String   // Base64-encoded IV
+  authTag          String   // Base64-encoded GCM auth tag
+  keyId            String   // KMS DEK key identifier (not the key itself)
+  keyVersion       String
+  encryptedKeyRef  String?  @map("encrypted_key_ref") // Wrapped DEK ref (for dev LocalKMS); null in production KMS
+  redactedDisplay  String?  @map("redacted_display")  // Pre-computed safe display, e.g. "j***@example.com"
+  isCryptoShredded Boolean  @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   client     Client              @relation(fields: [clientId], references: [id])
   accessLogs IdentityVaultAccessLog[]
@@ -814,4 +816,41 @@ model ClientDataDeletionRequest {
 
   @@index([clientId])
   @@map("client_data_deletion_requests")
+}
+
+// =============================================================
+// DATA SOURCE TARGETS (Phase 1D)
+// =============================================================
+// Foundation model for future deletion/opt-out workflows.
+// Describes where data may be found and what is needed to remove it.
+// Does NOT execute removal — that is a future phase.
+
+enum SourceType {
+  DATA_BROKER
+  SEARCH_ENGINE
+  SOCIAL_PLATFORM
+  PUBLIC_RECORD_SITE
+  PEOPLE_SEARCH
+  BREACH_INDEX
+  OTHER
+}
+
+model DataSourceTarget {
+  id                   String       @id @default(cuid())
+  sourceName           String       @unique  @map("source_name")
+  sourceType           SourceType             @map("source_type")
+  baseDomain           String?                @map("base_domain")
+  jurisdiction         String?
+  supportedActionTypes ActionType[]           @map("supported_action_types")
+  requiresLogin        Boolean      @default(false) @map("requires_login")
+  requiresCaptcha      Boolean      @default(false) @map("requires_captcha")
+  manualOnly           Boolean      @default(false) @map("manual_only")
+  piiRequiredFields    String[]               @map("pii_required_fields")
+  notes                String?
+  isActive             Boolean      @default(true)  @map("is_active")
+  createdAt            DateTime     @default(now())  @map("created_at")
+  updatedAt            DateTime     @updatedAt       @map("updated_at")
+
+  @@index([sourceType, isActive])
+  @@map("data_source_targets")
 }

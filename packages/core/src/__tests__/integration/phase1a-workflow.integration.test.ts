@@ -25,7 +25,10 @@ import {
   OperatorApprovalRepository,
   AuditLogRepository,
   CaseTimelineRepository,
+  IdentityVaultRecordRepository,
+  IdentityVaultAccessLogRepository,
 } from '@celator/db';
+import { LocalKmsProvider } from '@celator/security';
 import {
   AuditService,
   CaseTimelineService,
@@ -36,6 +39,7 @@ import {
   CleanupTaskService,
   ReviewPacketService,
   OperatorApprovalService,
+  IdentityVaultIntakeService,
 } from '../../index.js';
 
 // ---------------------------------------------------------------------------
@@ -692,5 +696,162 @@ describe('Phase 1A full workflow (integration)', () => {
         expect(raw).not.toMatch(/\b\d{3}-\d{2}-\d{4}\b/);
       }
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 1D: Vault intake integration tests
+// ---------------------------------------------------------------------------
+
+describe('Phase 1D vault intake (integration)', () => {
+  const TEST_KMS_MASTER = 'integration-test-master-secret-32-chars-minimum!!';
+  const TEST_KMS_SIGNING = 'integration-test-signing-secret-32-chars-minimum!!';
+
+  let vaultService: IdentityVaultIntakeService;
+  let clientId: string;
+
+  beforeAll(async () => {
+    const kms = new LocalKmsProvider(TEST_KMS_MASTER, TEST_KMS_SIGNING);
+    const vaultRecordRepo = new IdentityVaultRecordRepository(db);
+    const vaultAccessLogRepo = new IdentityVaultAccessLogRepository(db);
+    vaultService = new IdentityVaultIntakeService(vaultRecordRepo, vaultAccessLogRepo, kms);
+  });
+
+  beforeEach(async () => {
+    await cleanupTestData();
+    // Create bootstrap actor and client for vault tests
+    const newOrg = await db.organization.create({ data: { name: `${TEST_PREFIX}bootstrap_org` } });
+    BOOTSTRAP_ORG_ID = newOrg.id;
+    const newUser = await db.user.create({
+      data: {
+        organization: { connect: { id: BOOTSTRAP_ORG_ID } },
+        email: `${TEST_PREFIX}actor@integration.invalid`,
+        displayName: `${TEST_PREFIX}Integration Test Actor`,
+      },
+    });
+    TEST_ACTOR_ID = newUser.id;
+    const vaultOrg = await db.organization.create({ data: { name: `${TEST_PREFIX}vault_org_${suffix()}` } });
+    const vaultClient = await db.client.create({
+      data: { organizationId: vaultOrg.id, displayName: `${TEST_PREFIX}vault_client` },
+    });
+    clientId = vaultClient.id;
+  });
+
+  afterAll(async () => {
+    await cleanupTestData();
+  });
+
+  it('stores a vault record and returns redacted display (not plaintext)', async () => {
+    const result = await vaultService.store({
+      clientId,
+      fieldType: 'EMAIL',
+      plaintext: 'testuser@vault.invalid',
+      purposeCode: 'PURPOSE_OPERATOR_REVIEW_PACKET',
+      actorId: TEST_ACTOR_ID,
+      actorType: 'OPERATOR',
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.redactedDisplay).toBe('t***@vault.invalid');
+    expect(result.value.redactedDisplay).not.toContain('testuser');
+    expect(result.value.recordId).toBeTruthy();
+  });
+
+  it('does not store plaintext in the DB — ciphertext differs from plaintext', async () => {
+    const plaintext = 'testuser@vault.invalid';
+    const result = await vaultService.store({
+      clientId,
+      fieldType: 'EMAIL',
+      plaintext,
+      purposeCode: 'PURPOSE_OPERATOR_REVIEW_PACKET',
+      actorId: TEST_ACTOR_ID,
+      actorType: 'OPERATOR',
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    // Fetch the raw DB record
+    const raw = await db.identityVaultRecord.findUnique({ where: { id: result.value.recordId } });
+    expect(raw).not.toBeNull();
+    expect(raw?.ciphertext).not.toBe(plaintext);
+    expect(raw?.ciphertext).not.toContain('testuser');
+    // DB should NOT contain the plaintext anywhere in the vault record
+    const rowJson = JSON.stringify(raw);
+    expect(rowJson).not.toContain(plaintext);
+  });
+
+  it('writes an access log when storing', async () => {
+    const result = await vaultService.store({
+      clientId,
+      fieldType: 'EMAIL',
+      plaintext: 'testuser@vault.invalid',
+      purposeCode: 'PURPOSE_OPERATOR_REVIEW_PACKET',
+      actorId: TEST_ACTOR_ID,
+      actorType: 'OPERATOR',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const logs = await db.identityVaultAccessLog.findMany({ where: { recordId: result.value.recordId } });
+    expect(logs.length).toBe(1);
+    expect(logs[0]?.purposeCode).toBe('PURPOSE_OPERATOR_REVIEW_PACKET');
+    expect(logs[0]?.actorId).toBe(TEST_ACTOR_ID);
+    // No plaintext in access log
+    const logJson = JSON.stringify(logs[0]);
+    expect(logJson).not.toContain('testuser');
+  });
+
+  it('listMetadata returns redacted display without plaintext or ciphertext', async () => {
+    await vaultService.store({
+      clientId,
+      fieldType: 'EMAIL',
+      plaintext: 'listtest@vault.invalid',
+      purposeCode: 'PURPOSE_OPERATOR_REVIEW_PACKET',
+      actorId: TEST_ACTOR_ID,
+      actorType: 'OPERATOR',
+    });
+
+    const meta = await vaultService.listMetadata(clientId);
+    expect(meta.length).toBeGreaterThan(0);
+    expect(meta[0]?.fieldType).toBe('EMAIL');
+    expect(meta[0]?.redactedDisplay).toBe('l***@vault.invalid');
+
+    // Confirm no ciphertext or plaintext leaked through
+    const metaJson = JSON.stringify(meta);
+    expect(metaJson).not.toContain('ciphertext');
+    expect(metaJson).not.toContain('listtest');
+  });
+
+  it('logAccess records a second access log and returns redacted display', async () => {
+    const storeResult = await vaultService.store({
+      clientId,
+      fieldType: 'PHONE',
+      plaintext: '787-555-0001',
+      purposeCode: 'PURPOSE_OPERATOR_REVIEW_PACKET',
+      actorId: TEST_ACTOR_ID,
+      actorType: 'OPERATOR',
+    });
+    expect(storeResult.ok).toBe(true);
+    if (!storeResult.ok) return;
+
+    const accessResult = await vaultService.logAccess(
+      storeResult.value.recordId,
+      'PURPOSE_FORM_FILL',
+      TEST_ACTOR_ID,
+      'OPERATOR',
+    );
+    expect(accessResult.ok).toBe(true);
+    if (!accessResult.ok) return;
+    expect(accessResult.value.redactedDisplay).toBe('***-***-0001');
+    expect(accessResult.value.purposeCode).toBe('PURPOSE_FORM_FILL');
+
+    // Both logs should be in the DB
+    const logs = await db.identityVaultAccessLog.findMany({ where: { recordId: storeResult.value.recordId } });
+    expect(logs.length).toBe(2);
+    // Access logs must not contain raw phone
+    const logsJson = JSON.stringify(logs);
+    expect(logsJson).not.toContain('787-555-0001');
   });
 });
