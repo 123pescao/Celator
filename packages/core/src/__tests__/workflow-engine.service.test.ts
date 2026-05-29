@@ -153,6 +153,10 @@ function makeRunRepo(overrides?: Partial<TaskWorkflowRunRepository>): TaskWorkfl
   } as unknown as TaskWorkflowRunRepository;
 }
 
+// makePlaybookRepo already has findById returning FAKE_PLAYBOOK (a PlaybookWithSteps).
+// For setPlaybookStatus tests that need findById to return a plain RemovalPlaybook shape,
+// we use vi.mocked(playbookRepo.findById).mockResolvedValueOnce(...) per-test.
+
 function makeTaskRepo(): CleanupTaskRepository {
   return {
     findById: vi.fn().mockResolvedValue(FAKE_TASK),
@@ -460,6 +464,382 @@ describe('WorkflowEngineService', () => {
       if (!result.ok) return;
       expect(result.value.steps[0]?.title).toBe('Verify Requirements');
       expect(result.value.steps[0]?.instructions).toContain('Check the target');
+    });
+  });
+
+  // ─── advanceStep — WAIT_FOR_CONFIRMATION ──────────────────────────────────────
+
+  describe('advanceStep — WAIT_FOR_CONFIRMATION', () => {
+    it('sets run to WAITING when next step is WAIT_FOR_CONFIRMATION kind', async () => {
+      vi.mocked(runRepo.listStepRunsForRun).mockResolvedValueOnce([
+        { ...FAKE_STEP_RUN_1, status: 'READY' },
+        { ...FAKE_STEP_RUN_2, status: 'PENDING', stepKind: 'WAIT_FOR_CONFIRMATION' },
+      ]);
+      vi.mocked(runRepo.updateRunStatus).mockResolvedValueOnce({ ...FAKE_RUN, status: 'WAITING' });
+      const result = await svc.advanceStep('run_001', 'sr_001', {}, 'client_001', 'actor_001');
+      expect(result.ok).toBe(true);
+      expect(runRepo.updateRunStatus).toHaveBeenCalledWith('run_001', expect.objectContaining({ status: 'WAITING' }));
+    });
+
+    it('run transitions to IN_PROGRESS when advancing READY WAIT_FOR_CONFIRMATION step', async () => {
+      vi.mocked(runRepo.findById).mockResolvedValueOnce({ ...FAKE_RUN, status: 'WAITING' });
+      vi.mocked(runRepo.findStepRunById).mockResolvedValueOnce({ ...FAKE_STEP_RUN_1, status: 'READY', stepKind: 'WAIT_FOR_CONFIRMATION' });
+      vi.mocked(runRepo.listStepRunsForRun).mockResolvedValueOnce([
+        { ...FAKE_STEP_RUN_1, status: 'READY', stepKind: 'WAIT_FOR_CONFIRMATION' },
+        { ...FAKE_STEP_RUN_2, status: 'PENDING', stepKind: 'CLOSE_TASK' },
+      ]);
+      vi.mocked(runRepo.updateRunStatus).mockResolvedValueOnce({ ...FAKE_RUN, status: 'IN_PROGRESS' });
+      const result = await svc.advanceStep('run_001', 'sr_001', {}, 'client_001', 'actor_001');
+      expect(result.ok).toBe(true);
+      expect(runRepo.updateRunStatus).toHaveBeenCalledWith('run_001', expect.objectContaining({ status: 'IN_PROGRESS' }));
+    });
+  });
+
+  // ─── advanceStep — safeResultSummary PII gap fill ─────────────────────────────
+
+  describe('advanceStep — gap fills', () => {
+    it('rejects PII in safeResultSummary', async () => {
+      const result = await svc.advanceStep(
+        'run_001', 'sr_001',
+        { safeResultSummary: 'Call 555-123-4567 to confirm' },
+        'client_001', 'actor_001',
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('WORKFLOW_UNSAFE_TEXT');
+    });
+
+    it('returns FORBIDDEN when clientId does not match run.clientId', async () => {
+      vi.mocked(runRepo.findById).mockResolvedValueOnce({ ...FAKE_RUN, clientId: 'client_OTHER' });
+      const result = await svc.advanceStep('run_001', 'sr_001', {}, 'client_001', 'actor_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('FORBIDDEN');
+    });
+  });
+
+  // ─── blockStep — gap fills ────────────────────────────────────────────────────
+
+  describe('blockStep — gap fills', () => {
+    it('returns FORBIDDEN when clientId does not match run.clientId', async () => {
+      vi.mocked(runRepo.findById).mockResolvedValueOnce({ ...FAKE_RUN, clientId: 'client_OTHER' });
+      const result = await svc.blockStep('run_001', 'sr_001', { reason: 'Portal down' }, 'client_001', 'actor_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('FORBIDDEN');
+    });
+  });
+
+  // ─── attachManualSubmission — gap fills ───────────────────────────────────────
+
+  describe('attachManualSubmission — gap fills', () => {
+    it('returns WORKFLOW_INVALID_TRANSITION for completed run', async () => {
+      vi.mocked(runRepo.findById).mockResolvedValueOnce({ ...FAKE_RUN, status: 'COMPLETED' });
+      const result = await svc.attachManualSubmission('run_001', 'sr_001', { manualSubmissionId: 'sub_001' }, 'client_001', 'actor_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('WORKFLOW_INVALID_TRANSITION');
+    });
+
+    it('returns FORBIDDEN when clientId does not match run.clientId', async () => {
+      vi.mocked(runRepo.findById).mockResolvedValueOnce({ ...FAKE_RUN, clientId: 'client_OTHER' });
+      const result = await svc.attachManualSubmission('run_001', 'sr_001', { manualSubmissionId: 'sub_001' }, 'client_001', 'actor_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('FORBIDDEN');
+    });
+  });
+
+  // ─── unblockStep ──────────────────────────────────────────────────────────────
+
+  describe('unblockStep', () => {
+    it('transitions BLOCKED step to READY and run to IN_PROGRESS', async () => {
+      vi.mocked(runRepo.findById).mockResolvedValueOnce({ ...FAKE_RUN, status: 'BLOCKED' });
+      vi.mocked(runRepo.findStepRunById).mockResolvedValueOnce({ ...FAKE_STEP_RUN_1, status: 'BLOCKED' });
+      vi.mocked(runRepo.updateRunStatus).mockResolvedValueOnce({ ...FAKE_RUN, status: 'IN_PROGRESS' });
+      const result = await svc.unblockStep('run_001', 'sr_001', {}, 'client_001', 'actor_001');
+      expect(result.ok).toBe(true);
+      expect(runRepo.updateStepStatus).toHaveBeenCalledWith('sr_001', expect.objectContaining({ status: 'READY' }));
+      expect(runRepo.updateRunStatus).toHaveBeenCalledWith('run_001', expect.objectContaining({ status: 'IN_PROGRESS' }));
+    });
+
+    it('sets run to WAITING when unblocking a WAIT_FOR_CONFIRMATION step', async () => {
+      vi.mocked(runRepo.findById).mockResolvedValueOnce({ ...FAKE_RUN, status: 'BLOCKED' });
+      vi.mocked(runRepo.findStepRunById).mockResolvedValueOnce({ ...FAKE_STEP_RUN_1, status: 'BLOCKED', stepKind: 'WAIT_FOR_CONFIRMATION' });
+      vi.mocked(runRepo.updateRunStatus).mockResolvedValueOnce({ ...FAKE_RUN, status: 'WAITING' });
+      const result = await svc.unblockStep('run_001', 'sr_001', {}, 'client_001', 'actor_001');
+      expect(result.ok).toBe(true);
+      expect(runRepo.updateRunStatus).toHaveBeenCalledWith('run_001', expect.objectContaining({ status: 'WAITING' }));
+    });
+
+    it('returns WORKFLOW_INVALID_TRANSITION when run is not BLOCKED', async () => {
+      vi.mocked(runRepo.findById).mockResolvedValueOnce({ ...FAKE_RUN, status: 'IN_PROGRESS' });
+      const result = await svc.unblockStep('run_001', 'sr_001', {}, 'client_001', 'actor_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('WORKFLOW_INVALID_TRANSITION');
+    });
+
+    it('returns WORKFLOW_INVALID_TRANSITION when run is COMPLETED (terminal)', async () => {
+      vi.mocked(runRepo.findById).mockResolvedValueOnce({ ...FAKE_RUN, status: 'COMPLETED' });
+      const result = await svc.unblockStep('run_001', 'sr_001', {}, 'client_001', 'actor_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('WORKFLOW_INVALID_TRANSITION');
+    });
+
+    it('returns WORKFLOW_INVALID_TRANSITION when step is not BLOCKED', async () => {
+      vi.mocked(runRepo.findById).mockResolvedValueOnce({ ...FAKE_RUN, status: 'BLOCKED' });
+      vi.mocked(runRepo.findStepRunById).mockResolvedValueOnce({ ...FAKE_STEP_RUN_1, status: 'READY' });
+      const result = await svc.unblockStep('run_001', 'sr_001', {}, 'client_001', 'actor_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('WORKFLOW_INVALID_TRANSITION');
+    });
+
+    it('returns WORKFLOW_STEP_NOT_FOUND for stepRunId from a different run (cross-run isolation)', async () => {
+      vi.mocked(runRepo.findById).mockResolvedValueOnce({ ...FAKE_RUN, status: 'BLOCKED' });
+      vi.mocked(runRepo.findStepRunById).mockResolvedValueOnce({ ...FAKE_STEP_RUN_1, workflowRunId: 'run_OTHER' });
+      const result = await svc.unblockStep('run_001', 'sr_001', {}, 'client_001', 'actor_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('WORKFLOW_STEP_NOT_FOUND');
+    });
+
+    it('returns FORBIDDEN when clientId does not match run.clientId', async () => {
+      vi.mocked(runRepo.findById).mockResolvedValueOnce({ ...FAKE_RUN, status: 'BLOCKED', clientId: 'client_OTHER' });
+      const result = await svc.unblockStep('run_001', 'sr_001', {}, 'client_001', 'actor_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('FORBIDDEN');
+    });
+
+    it('rejects PII (email) in operatorNotes', async () => {
+      vi.mocked(runRepo.findById).mockResolvedValueOnce({ ...FAKE_RUN, status: 'BLOCKED' });
+      vi.mocked(runRepo.findStepRunById).mockResolvedValueOnce({ ...FAKE_STEP_RUN_1, status: 'BLOCKED' });
+      const result = await svc.unblockStep('run_001', 'sr_001', { operatorNotes: 'Contact admin@example.com' }, 'client_001', 'actor_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('WORKFLOW_UNSAFE_TEXT');
+    });
+
+    it('rejects PII (phone) in operatorNotes', async () => {
+      vi.mocked(runRepo.findById).mockResolvedValueOnce({ ...FAKE_RUN, status: 'BLOCKED' });
+      vi.mocked(runRepo.findStepRunById).mockResolvedValueOnce({ ...FAKE_STEP_RUN_1, status: 'BLOCKED' });
+      const result = await svc.unblockStep('run_001', 'sr_001', { operatorNotes: 'Call 555-123-4567' }, 'client_001', 'actor_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('WORKFLOW_UNSAFE_TEXT');
+    });
+
+    it('writes WORKFLOW_STEP_UNBLOCKED audit event', async () => {
+      vi.mocked(runRepo.findById).mockResolvedValueOnce({ ...FAKE_RUN, status: 'BLOCKED' });
+      vi.mocked(runRepo.findStepRunById).mockResolvedValueOnce({ ...FAKE_STEP_RUN_1, status: 'BLOCKED' });
+      vi.mocked(runRepo.updateRunStatus).mockResolvedValueOnce({ ...FAKE_RUN, status: 'IN_PROGRESS' });
+      await svc.unblockStep('run_001', 'sr_001', {}, 'client_001', 'actor_001');
+      expect(audit.write).toHaveBeenCalledWith(expect.objectContaining({ eventType: 'WORKFLOW_STEP_UNBLOCKED' }));
+    });
+
+    it('returns WORKFLOW_RUN_NOT_FOUND for missing run', async () => {
+      vi.mocked(runRepo.findById).mockResolvedValueOnce(null);
+      const result = await svc.unblockStep('run_001', 'sr_001', {}, 'client_001', 'actor_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('WORKFLOW_RUN_NOT_FOUND');
+    });
+  });
+
+  // ─── cancelWorkflow ───────────────────────────────────────────────────────────
+
+  describe('cancelWorkflow', () => {
+    it('transitions run to CANCELLED', async () => {
+      vi.mocked(runRepo.updateRunStatus).mockResolvedValueOnce({ ...FAKE_RUN, status: 'CANCELLED' });
+      const result = await svc.cancelWorkflow('run_001', { reason: 'Client withdrew request' }, 'client_001', 'actor_001');
+      expect(result.ok).toBe(true);
+      expect(runRepo.updateRunStatus).toHaveBeenCalledWith('run_001', expect.objectContaining({ status: 'CANCELLED' }));
+    });
+
+    it('marks all non-terminal steps SKIPPED including BLOCKED steps', async () => {
+      vi.mocked(runRepo.listStepRunsForRun).mockResolvedValueOnce([
+        { ...FAKE_STEP_RUN_1, status: 'READY' },
+        { ...FAKE_STEP_RUN_2, status: 'PENDING' },
+      ]);
+      vi.mocked(runRepo.updateRunStatus).mockResolvedValueOnce({ ...FAKE_RUN, status: 'CANCELLED' });
+      await svc.cancelWorkflow('run_001', { reason: 'Test cancel' }, 'client_001', 'actor_001');
+      expect(runRepo.updateStepStatus).toHaveBeenCalledWith('sr_001', expect.objectContaining({ status: 'SKIPPED' }));
+      expect(runRepo.updateStepStatus).toHaveBeenCalledWith('sr_002', expect.objectContaining({ status: 'SKIPPED' }));
+    });
+
+    it('does not call updateStepStatus when all steps are already terminal', async () => {
+      vi.mocked(runRepo.listStepRunsForRun).mockResolvedValueOnce([
+        { ...FAKE_STEP_RUN_1, status: 'COMPLETED' },
+        { ...FAKE_STEP_RUN_2, status: 'SKIPPED' },
+      ]);
+      vi.mocked(runRepo.updateRunStatus).mockResolvedValueOnce({ ...FAKE_RUN, status: 'CANCELLED' });
+      await svc.cancelWorkflow('run_001', { reason: 'All done already' }, 'client_001', 'actor_001');
+      expect(runRepo.updateStepStatus).not.toHaveBeenCalled();
+    });
+
+    it('BLOCKED run can still be cancelled', async () => {
+      vi.mocked(runRepo.findById).mockResolvedValueOnce({ ...FAKE_RUN, status: 'BLOCKED' });
+      vi.mocked(runRepo.updateRunStatus).mockResolvedValueOnce({ ...FAKE_RUN, status: 'CANCELLED' });
+      const result = await svc.cancelWorkflow('run_001', { reason: 'Abandoning blocked run' }, 'client_001', 'actor_001');
+      expect(result.ok).toBe(true);
+    });
+
+    it('returns WORKFLOW_INVALID_TRANSITION for COMPLETED run', async () => {
+      vi.mocked(runRepo.findById).mockResolvedValueOnce({ ...FAKE_RUN, status: 'COMPLETED' });
+      const result = await svc.cancelWorkflow('run_001', { reason: 'Too late' }, 'client_001', 'actor_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('WORKFLOW_INVALID_TRANSITION');
+    });
+
+    it('returns WORKFLOW_INVALID_TRANSITION for already CANCELLED run', async () => {
+      vi.mocked(runRepo.findById).mockResolvedValueOnce({ ...FAKE_RUN, status: 'CANCELLED' });
+      const result = await svc.cancelWorkflow('run_001', { reason: 'Double cancel' }, 'client_001', 'actor_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('WORKFLOW_INVALID_TRANSITION');
+    });
+
+    it('returns WORKFLOW_INVALID_TRANSITION for FAILED run', async () => {
+      vi.mocked(runRepo.findById).mockResolvedValueOnce({ ...FAKE_RUN, status: 'FAILED' });
+      const result = await svc.cancelWorkflow('run_001', { reason: 'Already failed' }, 'client_001', 'actor_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('WORKFLOW_INVALID_TRANSITION');
+    });
+
+    it('returns FORBIDDEN when clientId does not match run.clientId', async () => {
+      vi.mocked(runRepo.findById).mockResolvedValueOnce({ ...FAKE_RUN, clientId: 'client_OTHER' });
+      const result = await svc.cancelWorkflow('run_001', { reason: 'Test' }, 'client_001', 'actor_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('FORBIDDEN');
+    });
+
+    it('rejects PII (email) in reason', async () => {
+      const result = await svc.cancelWorkflow('run_001', { reason: 'User john@example.com cancelled' }, 'client_001', 'actor_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('WORKFLOW_UNSAFE_TEXT');
+    });
+
+    it('rejects PII (SSN pattern) in reason', async () => {
+      const result = await svc.cancelWorkflow('run_001', { reason: 'SSN 123-45-6789 mismatch' }, 'client_001', 'actor_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('WORKFLOW_UNSAFE_TEXT');
+    });
+
+    it('writes WORKFLOW_CANCELLED audit event', async () => {
+      vi.mocked(runRepo.updateRunStatus).mockResolvedValueOnce({ ...FAKE_RUN, status: 'CANCELLED' });
+      await svc.cancelWorkflow('run_001', { reason: 'Client request' }, 'client_001', 'actor_001');
+      expect(audit.write).toHaveBeenCalledWith(expect.objectContaining({ eventType: 'WORKFLOW_CANCELLED' }));
+    });
+
+    it('appends WORKFLOW_CANCELLED timeline event', async () => {
+      vi.mocked(runRepo.updateRunStatus).mockResolvedValueOnce({ ...FAKE_RUN, status: 'CANCELLED' });
+      await svc.cancelWorkflow('run_001', { reason: 'Client request' }, 'client_001', 'actor_001');
+      expect(timeline.append).toHaveBeenCalledWith(expect.objectContaining({ eventType: 'WORKFLOW_CANCELLED' }));
+    });
+
+    it('audit metadata does not include reason text', async () => {
+      vi.mocked(runRepo.updateRunStatus).mockResolvedValueOnce({ ...FAKE_RUN, status: 'CANCELLED' });
+      await svc.cancelWorkflow('run_001', { reason: 'Client request for privacy' }, 'client_001', 'actor_001');
+      const auditCall = vi.mocked(audit.write).mock.calls.find(
+        ([arg]) => arg.eventType === 'WORKFLOW_CANCELLED',
+      );
+      expect(auditCall).toBeDefined();
+      const metadata = auditCall![0].metadata as Record<string, unknown>;
+      expect(JSON.stringify(metadata)).not.toContain('Client request');
+    });
+
+    it('returns WORKFLOW_RUN_NOT_FOUND for missing run', async () => {
+      vi.mocked(runRepo.findById).mockResolvedValueOnce(null);
+      const result = await svc.cancelWorkflow('run_001', { reason: 'Test' }, 'client_001', 'actor_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('WORKFLOW_RUN_NOT_FOUND');
+    });
+  });
+
+  // ─── setPlaybookStatus ────────────────────────────────────────────────────────
+
+  describe('setPlaybookStatus', () => {
+    it('changes ACTIVE playbook to INACTIVE', async () => {
+      vi.mocked(playbookRepo.findById).mockResolvedValueOnce({ ...FAKE_PLAYBOOK, status: 'ACTIVE' });
+      vi.mocked(playbookRepo.setStatus).mockResolvedValueOnce({ ...FAKE_PLAYBOOK, status: 'INACTIVE' });
+      const result = await svc.setPlaybookStatus('pb_001', 'INACTIVE', 'actor_001');
+      expect(result.ok).toBe(true);
+      expect(playbookRepo.setStatus).toHaveBeenCalledWith('pb_001', 'INACTIVE');
+    });
+
+    it('changes ACTIVE playbook to DEPRECATED', async () => {
+      vi.mocked(playbookRepo.findById).mockResolvedValueOnce({ ...FAKE_PLAYBOOK, status: 'ACTIVE' });
+      vi.mocked(playbookRepo.setStatus).mockResolvedValueOnce({ ...FAKE_PLAYBOOK, status: 'DEPRECATED' });
+      const result = await svc.setPlaybookStatus('pb_001', 'DEPRECATED', 'actor_001');
+      expect(result.ok).toBe(true);
+    });
+
+    it('allows INACTIVE to be set back to ACTIVE', async () => {
+      vi.mocked(playbookRepo.findById).mockResolvedValueOnce({ ...FAKE_PLAYBOOK, status: 'INACTIVE' });
+      vi.mocked(playbookRepo.setStatus).mockResolvedValueOnce({ ...FAKE_PLAYBOOK, status: 'ACTIVE' });
+      const result = await svc.setPlaybookStatus('pb_001', 'ACTIVE', 'actor_001');
+      expect(result.ok).toBe(true);
+    });
+
+    it('rejects DEPRECATED → ACTIVE (cannot un-deprecate) and does not call setStatus', async () => {
+      vi.mocked(playbookRepo.findById).mockResolvedValueOnce({ ...FAKE_PLAYBOOK, status: 'DEPRECATED' });
+      const result = await svc.setPlaybookStatus('pb_001', 'ACTIVE', 'actor_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('WORKFLOW_INVALID_TRANSITION');
+      expect(playbookRepo.setStatus).not.toHaveBeenCalled();
+    });
+
+    it('rejects DEPRECATED → INACTIVE', async () => {
+      vi.mocked(playbookRepo.findById).mockResolvedValueOnce({ ...FAKE_PLAYBOOK, status: 'DEPRECATED' });
+      const result = await svc.setPlaybookStatus('pb_001', 'INACTIVE', 'actor_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('WORKFLOW_INVALID_TRANSITION');
+    });
+
+    it('rejects same-status transition (ACTIVE → ACTIVE)', async () => {
+      vi.mocked(playbookRepo.findById).mockResolvedValueOnce({ ...FAKE_PLAYBOOK, status: 'ACTIVE' });
+      const result = await svc.setPlaybookStatus('pb_001', 'ACTIVE', 'actor_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('WORKFLOW_INVALID_TRANSITION');
+    });
+
+    it('returns PLAYBOOK_NOT_FOUND for missing playbook', async () => {
+      vi.mocked(playbookRepo.findById).mockResolvedValueOnce(null);
+      const result = await svc.setPlaybookStatus('pb_missing', 'INACTIVE', 'actor_001');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toBe('PLAYBOOK_NOT_FOUND');
+    });
+
+    it('writes WORKFLOW_PLAYBOOK_STATUS_CHANGED audit event with from/to fields', async () => {
+      vi.mocked(playbookRepo.findById).mockResolvedValueOnce({ ...FAKE_PLAYBOOK, status: 'ACTIVE' });
+      vi.mocked(playbookRepo.setStatus).mockResolvedValueOnce({ ...FAKE_PLAYBOOK, status: 'INACTIVE' });
+      await svc.setPlaybookStatus('pb_001', 'INACTIVE', 'actor_001');
+      expect(audit.write).toHaveBeenCalledWith(expect.objectContaining({
+        eventType: 'WORKFLOW_PLAYBOOK_STATUS_CHANGED',
+        metadata: expect.objectContaining({ from: 'ACTIVE', to: 'INACTIVE' }),
+      }));
+    });
+  });
+
+  // ─── listWorkflowRunsForClient ────────────────────────────────────────────────
+
+  describe('listWorkflowRunsForClient', () => {
+    it('returns safe run headers for client runs', async () => {
+      vi.mocked(runRepo.listForClient).mockResolvedValueOnce([FAKE_RUN]);
+      const result = await svc.listWorkflowRunsForClient('client_001');
+      expect(result).toHaveLength(1);
+      expect(result[0]?.id).toBe('run_001');
+      expect(result[0]?.clientId).toBe('client_001');
+    });
+
+    it('returns empty array when no runs exist for client', async () => {
+      vi.mocked(runRepo.listForClient).mockResolvedValueOnce([]);
+      const result = await svc.listWorkflowRunsForClient('client_001');
+      expect(result).toEqual([]);
+    });
+
+    it('omits taskId from returned headers (security: no cross-resource enumeration)', async () => {
+      vi.mocked(runRepo.listForClient).mockResolvedValueOnce([FAKE_RUN]);
+      const result = await svc.listWorkflowRunsForClient('client_001');
+      expect(result[0]).not.toHaveProperty('taskId');
+    });
+
+    it('response contains no ciphertext or vault fields', async () => {
+      vi.mocked(runRepo.listForClient).mockResolvedValueOnce([FAKE_RUN]);
+      const result = await svc.listWorkflowRunsForClient('client_001');
+      const json = JSON.stringify(result);
+      expect(json).not.toContain('ciphertext');
+      expect(json).not.toContain('authTag');
+      expect(json).not.toContain('encryptedKeyRef');
     });
   });
 });

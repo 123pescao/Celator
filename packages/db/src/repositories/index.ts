@@ -22,3 +22,7 @@ export { RemovalPlaybookRepository } from './removal-playbook.repository.js';
 export type { PlaybookWithSteps, PlaybookStatus, WorkflowStepKind } from './removal-playbook.repository.js';
 export { TaskWorkflowRunRepository } from './task-workflow-run.repository.js';
 export type { WorkflowRunWithSteps, WorkflowRunStatus, WorkflowStepStatus, TaskWorkflowRun, TaskWorkflowStepRun } from './task-workflow-run.repository.js';
+export { RemovalRequestPacketRepository } from './removal-request-packet.repository.js';
+export type { PacketWithItems, PacketStatus } from './removal-request-packet.repository.js';
+export { FollowUpReminderRepository } from './follow-up-reminder.repository.js';
+export type { FollowUpStatus } from './follow-up-reminder.repository.js';

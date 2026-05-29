@@ -999,6 +999,362 @@ if require_ok "GET /clients/:clientId/audit-logs" "200"; then
   fi
 fi
 
+# ── Step 53: Unblock a blocked workflow step ───────────────────────────────────
+header "POST /workflow-runs/:runId/steps/:stepId/unblock"
+if [[ -n "$WORKFLOW_RUN_ID2" && -n "$FIRST_STEP_RUN_ID2" ]]; then
+  api_call POST "/api/v1/workflow-runs/${WORKFLOW_RUN_ID2}/steps/${FIRST_STEP_RUN_ID2}/unblock" \
+    "{\"clientId\":\"${CLIENT_ID}\"}"
+  if require_ok "POST /workflow-runs/:runId/steps/:stepId/unblock" "200"; then
+    if echo "$LAST_BODY" | grep -q '"IN_PROGRESS"'; then
+      pass "unblock: run status is IN_PROGRESS"
+    else
+      fail "unblock: expected IN_PROGRESS in response"
+    fi
+    if echo "$LAST_BODY" | grep -q '"READY"'; then
+      pass "unblock: step status is READY"
+    else
+      fail "unblock: expected READY step in response"
+    fi
+  fi
+else
+  pass "unblock: skipped (WORKFLOW_RUN_ID2 or FIRST_STEP_RUN_ID2 not available)"
+fi
+
+# ── Step 54: Cancel a workflow run ────────────────────────────────────────────
+header "POST /workflow-runs/:runId/cancel"
+WORKFLOW_RUN_ID3=""
+if [[ -n "$LINKED_TASK_ID" && -n "$PLAYBOOK_ID" ]]; then
+  api_call POST "/api/v1/tasks/${LINKED_TASK_ID}/workflow-runs" \
+    "{\"clientId\":\"${CLIENT_ID}\",\"playbookId\":\"${PLAYBOOK_ID}\"}"
+  if require_ok "POST /tasks/:taskId/workflow-runs (for cancel test)" "201"; then
+    WORKFLOW_RUN_ID3=$(extract_field "$LAST_BODY" ".workflowState.run.id" "id")
+    pass "cancel-test run created: ${WORKFLOW_RUN_ID3:-UNKNOWN}"
+  fi
+fi
+
+if [[ -n "$WORKFLOW_RUN_ID3" ]]; then
+  api_call POST "/api/v1/workflow-runs/${WORKFLOW_RUN_ID3}/cancel" \
+    "{\"clientId\":\"${CLIENT_ID}\",\"reason\":\"Smoke test cancel — scope exhausted\"}"
+  if require_ok "POST /workflow-runs/:runId/cancel" "200"; then
+    if echo "$LAST_BODY" | grep -q '"CANCELLED"'; then
+      pass "cancel: run status is CANCELLED"
+    else
+      fail "cancel: expected CANCELLED in response"
+    fi
+    if echo "$LAST_BODY" | grep -q '"SKIPPED"'; then
+      pass "cancel: at least one step is SKIPPED"
+    else
+      fail "cancel: expected SKIPPED step(s) in response"
+    fi
+  fi
+else
+  pass "cancel: skipped (run id not available)"
+fi
+
+# ── Step 55: PII rejection in cancel reason ────────────────────────────────────
+header "POST /workflow-runs/:runId/cancel (PII in reason — should reject)"
+CANCEL_PII_RUN_ID=""
+if [[ -n "$LINKED_TASK_ID" && -n "$PLAYBOOK_ID" ]]; then
+  api_call POST "/api/v1/tasks/${LINKED_TASK_ID}/workflow-runs" \
+    "{\"clientId\":\"${CLIENT_ID}\",\"playbookId\":\"${PLAYBOOK_ID}\"}"
+  if [[ "$LAST_CODE" == "201" ]]; then
+    CANCEL_PII_RUN_ID=$(extract_field "$LAST_BODY" ".workflowState.run.id" "id")
+  fi
+fi
+
+if [[ -n "$CANCEL_PII_RUN_ID" ]]; then
+  api_call POST "/api/v1/workflow-runs/${CANCEL_PII_RUN_ID}/cancel" \
+    "{\"clientId\":\"${CLIENT_ID}\",\"reason\":\"Contact admin@badbroker.com for confirmation\"}"
+  if echo "$LAST_BODY" | grep -q '"WORKFLOW_UNSAFE_TEXT"'; then
+    pass "cancel PII: correctly rejected WORKFLOW_UNSAFE_TEXT"
+  elif [[ "$LAST_CODE" == "400" ]]; then
+    pass "cancel PII: HTTP 400 as expected"
+  else
+    fail "cancel PII: expected 400, got ${LAST_CODE}"
+  fi
+else
+  pass "cancel PII: skipped (run id not available)"
+fi
+
+# ── Step 56: Change playbook status ───────────────────────────────────────────
+header "PATCH /api/v1/removal-playbooks/:playbookId/status"
+if [[ -n "$PLAYBOOK_ID" ]]; then
+  api_call PATCH "/api/v1/removal-playbooks/${PLAYBOOK_ID}/status" \
+    "{\"status\":\"INACTIVE\"}"
+  if require_ok "PATCH /removal-playbooks/:playbookId/status" "200"; then
+    if echo "$LAST_BODY" | grep -q '"INACTIVE"'; then
+      pass "playbook status: set to INACTIVE"
+    else
+      fail "playbook status: expected INACTIVE in response"
+    fi
+  fi
+  api_call PATCH "/api/v1/removal-playbooks/${PLAYBOOK_ID}/status" \
+    "{\"status\":\"ACTIVE\"}"
+  if [[ "$LAST_CODE" == "200" ]]; then
+    pass "playbook status: restored to ACTIVE"
+  else
+    fail "playbook status: could not restore to ACTIVE (${LAST_CODE})"
+  fi
+else
+  pass "playbook status: skipped (PLAYBOOK_ID not available)"
+fi
+
+# ── Step 57: List client workflow runs ────────────────────────────────────────
+header "GET /api/v1/clients/:clientId/workflow-runs"
+if [[ -n "$CLIENT_ID" ]]; then
+  api_call GET "/api/v1/clients/${CLIENT_ID}/workflow-runs"
+  if require_ok "GET /clients/:clientId/workflow-runs" "200"; then
+    if echo "$LAST_BODY" | grep -q '"runs"'; then
+      pass "client runs: runs array present"
+    else
+      fail "client runs: runs field missing"
+    fi
+    if echo "$LAST_BODY" | grep -q '"taskId"'; then
+      fail "client runs: taskId leaked in list response (security violation)"
+    else
+      pass "client runs: no taskId in list response"
+    fi
+    if echo "$LAST_BODY" | grep -qE '"ciphertext"|"authTag"|"encryptedKeyRef"'; then
+      fail "client runs: vault field leaked in response"
+    else
+      pass "client runs: no vault fields in response"
+    fi
+  fi
+else
+  pass "client runs: skipped (CLIENT_ID not available)"
+fi
+
+# ── Step 58: Generate a removal request packet ────────────────────────────────
+header "POST /api/v1/tasks/:taskId/removal-request-packets"
+PACKET_ID=""
+PACKET_ITEM_ID=""
+if [[ -n "$LINKED_TASK_ID" && -n "$CLIENT_ID" ]]; then
+  api_call POST "/api/v1/tasks/${LINKED_TASK_ID}/removal-request-packets" \
+    "{\"clientId\":\"${CLIENT_ID}\"}"
+  if require_ok "POST /tasks/:taskId/removal-request-packets" "201"; then
+    PACKET_ID=$(extract_field "$LAST_BODY" ".packet.id" "id")
+    if [[ -n "$PACKET_ID" && "$PACKET_ID" != "null" ]]; then
+      pass "packet created: ${PACKET_ID}"
+    else
+      fail "packet: could not extract id"
+    fi
+    if echo "$LAST_BODY" | grep -q '"status":"DRAFT"'; then
+      pass "packet: status is DRAFT"
+    else
+      fail "packet: expected DRAFT status"
+    fi
+    if echo "$LAST_BODY" | grep -q '"items"'; then
+      pass "packet: items array present"
+    else
+      fail "packet: items array missing"
+    fi
+    if echo "$LAST_BODY" | grep -qE '"ciphertext"|"authTag"|"encryptedKeyRef"'; then
+      fail "packet: vault field leaked"
+    else
+      pass "packet: no vault fields in response"
+    fi
+    # Extract first item ID for next step
+    if $JQ_AVAILABLE; then
+      PACKET_ITEM_ID=$(echo "$LAST_BODY" | jq -r '.packet.items[0].id' 2>/dev/null || echo "")
+    fi
+  fi
+else
+  pass "packet generation: skipped (LINKED_TASK_ID or CLIENT_ID not available)"
+fi
+
+# ── Step 59: List packets for task ────────────────────────────────────────────
+header "GET /api/v1/tasks/:taskId/removal-request-packets"
+if [[ -n "$LINKED_TASK_ID" ]]; then
+  api_call GET "/api/v1/tasks/${LINKED_TASK_ID}/removal-request-packets"
+  if require_ok "GET /tasks/:taskId/removal-request-packets" "200"; then
+    if echo "$LAST_BODY" | grep -q '"packets"'; then
+      pass "packet list: packets array present"
+    else
+      fail "packet list: packets field missing"
+    fi
+  fi
+else
+  pass "packet list: skipped"
+fi
+
+# ── Step 60: Complete a packet checklist item ─────────────────────────────────
+header "POST /removal-request-packets/:packetId/items/:itemId/complete"
+if [[ -n "$PACKET_ID" && -n "$PACKET_ITEM_ID" && -n "$CLIENT_ID" ]]; then
+  api_call POST "/api/v1/removal-request-packets/${PACKET_ID}/items/${PACKET_ITEM_ID}/complete" \
+    "{\"clientId\":\"${CLIENT_ID}\"}"
+  if require_ok "POST /removal-request-packets/.../items/.../complete" "200"; then
+    if echo "$LAST_BODY" | grep -q '"COMPLETED"'; then
+      pass "packet item: at least one item is COMPLETED"
+    else
+      fail "packet item: expected COMPLETED status in response"
+    fi
+  fi
+else
+  pass "packet item complete: skipped"
+fi
+
+# ── Step 61: Block a packet checklist item (PII rejection) ────────────────────
+header "POST /removal-request-packets/:packetId/items/:itemId/block (PII in reason — should reject)"
+if [[ -n "$PACKET_ID" && -n "$PACKET_ITEM_ID" && -n "$CLIENT_ID" ]]; then
+  api_call POST "/api/v1/removal-request-packets/${PACKET_ID}/items/${PACKET_ITEM_ID}/block" \
+    "{\"clientId\":\"${CLIENT_ID}\",\"reason\":\"Contact admin@badbroker.com to unblock\"}"
+  if echo "$LAST_BODY" | grep -q '"WORKFLOW_UNSAFE_TEXT"'; then
+    pass "packet block PII: correctly rejected WORKFLOW_UNSAFE_TEXT"
+  elif [[ "$LAST_CODE" == "400" ]]; then
+    pass "packet block PII: HTTP 400 as expected"
+  else
+    fail "packet block PII: expected 400, got ${LAST_CODE}"
+  fi
+else
+  pass "packet block PII: skipped"
+fi
+
+# ── Step 62: Schedule a follow-up reminder ────────────────────────────────────
+header "POST /api/v1/tasks/:taskId/follow-ups"
+FOLLOW_UP_ID=""
+FUTURE_DUE=$(date -u -d "+7 days" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+7d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "2030-01-01T00:00:00Z")
+if [[ -n "$LINKED_TASK_ID" && -n "$CLIENT_ID" ]]; then
+  api_call POST "/api/v1/tasks/${LINKED_TASK_ID}/follow-ups" \
+    "{\"clientId\":\"${CLIENT_ID}\",\"dueAt\":\"${FUTURE_DUE}\"}"
+  if require_ok "POST /tasks/:taskId/follow-ups" "201"; then
+    FOLLOW_UP_ID=$(extract_field "$LAST_BODY" ".followUp.id" "id")
+    if [[ -n "$FOLLOW_UP_ID" && "$FOLLOW_UP_ID" != "null" ]]; then
+      pass "follow-up scheduled: ${FOLLOW_UP_ID}"
+    else
+      fail "follow-up: could not extract id"
+    fi
+    if echo "$LAST_BODY" | grep -q '"status":"PENDING"'; then
+      pass "follow-up: status is PENDING"
+    else
+      fail "follow-up: expected PENDING status"
+    fi
+  fi
+else
+  pass "follow-up schedule: skipped"
+fi
+
+# ── Step 63: List follow-ups for client ───────────────────────────────────────
+header "GET /api/v1/clients/:clientId/follow-ups"
+if [[ -n "$CLIENT_ID" ]]; then
+  api_call GET "/api/v1/clients/${CLIENT_ID}/follow-ups"
+  if require_ok "GET /clients/:clientId/follow-ups" "200"; then
+    if echo "$LAST_BODY" | grep -q '"followUps"'; then
+      pass "follow-up list: followUps array present"
+    else
+      fail "follow-up list: followUps field missing"
+    fi
+  fi
+else
+  pass "follow-up list: skipped"
+fi
+
+# ── Step 64: List due follow-ups ──────────────────────────────────────────────
+header "GET /api/v1/follow-ups/due"
+if [[ -n "$CLIENT_ID" ]]; then
+  api_call GET "/api/v1/follow-ups/due?clientId=${CLIENT_ID}"
+  if require_ok "GET /follow-ups/due" "200"; then
+    if echo "$LAST_BODY" | grep -q '"followUps"'; then
+      pass "due follow-ups: followUps array present"
+    else
+      fail "due follow-ups: followUps field missing"
+    fi
+  fi
+else
+  pass "due follow-ups: skipped"
+fi
+
+# ── Step 65: PII rejection in follow-up safeNote ─────────────────────────────
+header "POST /api/v1/tasks/:taskId/follow-ups (PII in safeNote — should reject)"
+if [[ -n "$LINKED_TASK_ID" && -n "$CLIENT_ID" ]]; then
+  api_call POST "/api/v1/tasks/${LINKED_TASK_ID}/follow-ups" \
+    "{\"clientId\":\"${CLIENT_ID}\",\"dueAt\":\"${FUTURE_DUE}\",\"safeNote\":\"Follow up with admin@badbroker.com\"}"
+  if echo "$LAST_BODY" | grep -q '"WORKFLOW_UNSAFE_TEXT"'; then
+    pass "follow-up PII: correctly rejected WORKFLOW_UNSAFE_TEXT"
+  elif [[ "$LAST_CODE" == "400" ]]; then
+    pass "follow-up PII: HTTP 400 as expected"
+  else
+    fail "follow-up PII: expected 400, got ${LAST_CODE}"
+  fi
+else
+  pass "follow-up PII: skipped"
+fi
+
+# ── Step 66: Complete a follow-up ─────────────────────────────────────────────
+header "POST /api/v1/follow-ups/:followUpId/complete"
+if [[ -n "$FOLLOW_UP_ID" && -n "$CLIENT_ID" ]]; then
+  api_call POST "/api/v1/follow-ups/${FOLLOW_UP_ID}/complete" \
+    "{\"clientId\":\"${CLIENT_ID}\"}"
+  if require_ok "POST /follow-ups/:followUpId/complete" "200"; then
+    if echo "$LAST_BODY" | grep -q '"COMPLETED"'; then
+      pass "follow-up complete: status is COMPLETED"
+    else
+      fail "follow-up complete: expected COMPLETED status"
+    fi
+  fi
+else
+  pass "follow-up complete: skipped"
+fi
+
+# ── Step 67: Register evidence metadata ───────────────────────────────────────
+header "POST /api/v1/tasks/:taskId/evidence"
+EVIDENCE_ID=""
+if [[ -n "$LINKED_TASK_ID" && -n "$CLIENT_ID" ]]; then
+  api_call POST "/api/v1/tasks/${LINKED_TASK_ID}/evidence" \
+    "{\"clientId\":\"${CLIENT_ID}\",\"storageKey\":\"evidence/${LINKED_TASK_ID}/screen.png\",\"contentHash\":\"abc123def456abc123\",\"evidenceType\":\"SCREENSHOT\",\"mimeType\":\"image/png\"}"
+  if require_ok "POST /tasks/:taskId/evidence" "201"; then
+    EVIDENCE_ID=$(extract_field "$LAST_BODY" ".evidence.id" "id")
+    if [[ -n "$EVIDENCE_ID" && "$EVIDENCE_ID" != "null" ]]; then
+      pass "evidence registered: ${EVIDENCE_ID}"
+    else
+      fail "evidence: could not extract id"
+    fi
+    if echo "$LAST_BODY" | grep -qE '"ciphertext"|"authTag"'; then
+      fail "evidence: vault field leaked in response"
+    else
+      pass "evidence: no vault fields in response"
+    fi
+  fi
+else
+  pass "evidence register: skipped"
+fi
+
+# ── Step 68: Reject evidence with unsafe storageKey ───────────────────────────
+header "POST /api/v1/tasks/:taskId/evidence (unsafe storageKey — should reject)"
+if [[ -n "$LINKED_TASK_ID" && -n "$CLIENT_ID" ]]; then
+  api_call POST "/api/v1/tasks/${LINKED_TASK_ID}/evidence" \
+    "{\"clientId\":\"${CLIENT_ID}\",\"storageKey\":\"s3://bucket/user@example.com/screen.png\",\"contentHash\":\"abc123\",\"evidenceType\":\"SCREENSHOT\"}"
+  if echo "$LAST_BODY" | grep -q '"VALIDATION_ERROR"'; then
+    pass "evidence unsafe key: correctly rejected VALIDATION_ERROR"
+  elif [[ "$LAST_CODE" == "400" ]]; then
+    pass "evidence unsafe key: HTTP 400 as expected"
+  else
+    fail "evidence unsafe key: expected 400, got ${LAST_CODE}"
+  fi
+else
+  pass "evidence unsafe key: skipped"
+fi
+
+# ── Step 69: List evidence for task ───────────────────────────────────────────
+header "GET /api/v1/tasks/:taskId/evidence"
+if [[ -n "$LINKED_TASK_ID" && -n "$CLIENT_ID" ]]; then
+  api_call GET "/api/v1/tasks/${LINKED_TASK_ID}/evidence?clientId=${CLIENT_ID}"
+  if require_ok "GET /tasks/:taskId/evidence" "200"; then
+    if echo "$LAST_BODY" | grep -q '"evidence"'; then
+      pass "evidence list: evidence array present"
+    else
+      fail "evidence list: evidence field missing"
+    fi
+    # storageKey must NOT be in list response
+    if echo "$LAST_BODY" | grep -q '"storageKey"'; then
+      fail "evidence list: storageKey leaked in list response"
+    else
+      pass "evidence list: no storageKey in list response"
+    fi
+  fi
+else
+  pass "evidence list: skipped"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo
 echo "════════════════════════════════════════════════════════"
@@ -1011,9 +1367,12 @@ echo "  Data source target:      ${DATA_SOURCE_TARGET_ID:-UNKNOWN}"
 echo "  Manual submission:       ${SUBMISSION_ID:-UNKNOWN}"
 echo "  Playbook:                ${PLAYBOOK_ID:-UNKNOWN}"
 echo "  Workflow run:            ${WORKFLOW_RUN_ID:-UNKNOWN}"
+echo "  Packet:                  ${PACKET_ID:-UNKNOWN}"
+echo "  Follow-up:               ${FOLLOW_UP_ID:-UNKNOWN}"
+echo "  Evidence:                ${EVIDENCE_ID:-UNKNOWN}"
 echo "════════════════════════════════════════════════════════"
 if [[ $FAILURES -eq 0 ]]; then
-  echo "  ALL SMOKE STEPS PASSED (52/52)"
+  echo "  ALL SMOKE STEPS PASSED (69/69)"
   echo "════════════════════════════════════════════════════════"
   exit 0
 else

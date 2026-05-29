@@ -3,6 +3,7 @@ import type {
   TaskWorkflowRunRepository,
   CleanupTaskRepository,
   PlaybookWithSteps,
+  PlaybookStatus,
   WorkflowRunStatus,
   WorkflowStepKind,
 } from '@celator/db';
@@ -53,6 +54,14 @@ export interface BlockStepInput {
 
 export interface AttachManualSubmissionInput {
   manualSubmissionId: string;
+}
+
+export interface UnblockStepInput {
+  operatorNotes?: string | undefined;
+}
+
+export interface CancelWorkflowInput {
+  reason: string;
 }
 
 // ─── Safe return types — no ciphertext, no vault fields ──────────────────────
@@ -120,6 +129,19 @@ export interface SafeWorkflowState {
     updatedAt: Date;
   };
   steps: SafeWorkflowStepRun[];
+}
+
+// List endpoint response — omits taskId to prevent cross-resource enumeration
+export interface SafeWorkflowRunHeader {
+  id: string;
+  clientId: string;
+  playbookId: string;
+  status: WorkflowRunStatus;
+  currentStepOrder: number | null;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 // ─── Allowed step kinds for submission attachment ─────────────────────────────
@@ -192,6 +214,20 @@ function toSafeRun(run: TaskWorkflowRun): SafeWorkflowState['run'] {
   return {
     id: run.id,
     taskId: run.taskId,
+    clientId: run.clientId,
+    playbookId: run.playbookId,
+    status: run.status,
+    currentStepOrder: run.currentStepOrder,
+    startedAt: run.startedAt,
+    completedAt: run.completedAt,
+    createdAt: run.createdAt,
+    updatedAt: run.updatedAt,
+  };
+}
+
+function toSafeRunHeader(run: TaskWorkflowRun): SafeWorkflowRunHeader {
+  return {
+    id: run.id,
     clientId: run.clientId,
     playbookId: run.playbookId,
     status: run.status,
@@ -389,6 +425,10 @@ export class WorkflowEngineService {
       return err('WORKFLOW_INVALID_TRANSITION', `Workflow run is in terminal status "${run.status}"`);
     }
 
+    if (run.clientId !== clientId) {
+      return err('FORBIDDEN', 'Access denied — workflow run belongs to a different client');
+    }
+
     const stepRun = await this.runRepo.findStepRunById(stepRunId);
     if (!stepRun || stepRun.workflowRunId !== workflowRunId) {
       return err('WORKFLOW_STEP_NOT_FOUND', `Step run ${stepRunId} not found in run ${workflowRunId}`);
@@ -431,6 +471,9 @@ export class WorkflowEngineService {
       const nextStep = pendingSteps[0]!;
       await this.runRepo.updateStepStatus(nextStep.id, { status: 'READY' });
       nextStepOrder = nextStep.stepOrder;
+      if (nextStep.stepKind === 'WAIT_FOR_CONFIRMATION') {
+        newStatus = 'WAITING';
+      }
     } else {
       // No more pending steps — check if all are done
       const nonDone = allStepRuns.filter(
@@ -493,6 +536,10 @@ export class WorkflowEngineService {
       return err('WORKFLOW_INVALID_TRANSITION', `Workflow run is in terminal status "${run.status}"`);
     }
 
+    if (run.clientId !== clientId) {
+      return err('FORBIDDEN', 'Access denied — workflow run belongs to a different client');
+    }
+
     const stepRun = await this.runRepo.findStepRunById(stepRunId);
     if (!stepRun || stepRun.workflowRunId !== workflowRunId) {
       return err('WORKFLOW_STEP_NOT_FOUND', `Step run ${stepRunId} not found in run ${workflowRunId}`);
@@ -550,6 +597,14 @@ export class WorkflowEngineService {
     const run = await this.runRepo.findById(workflowRunId);
     if (!run) return err('WORKFLOW_RUN_NOT_FOUND', `Workflow run ${workflowRunId} not found`);
 
+    if (TERMINAL_RUN_STATUSES.includes(run.status)) {
+      return err('WORKFLOW_INVALID_TRANSITION', `Cannot attach submission to a ${run.status} workflow run`);
+    }
+
+    if (run.clientId !== clientId) {
+      return err('FORBIDDEN', 'Access denied — workflow run belongs to a different client');
+    }
+
     const stepRun = await this.runRepo.findStepRunById(stepRunId);
     if (!stepRun || stepRun.workflowRunId !== workflowRunId) {
       return err('WORKFLOW_STEP_NOT_FOUND', `Step run ${stepRunId} not found in run ${workflowRunId}`);
@@ -604,6 +659,172 @@ export class WorkflowEngineService {
     const resolved = run ?? (await this.runRepo.findLatestByTaskId(taskId));
     if (!resolved) return err('WORKFLOW_RUN_NOT_FOUND', `No workflow run found for task ${taskId}`);
     return this._buildWorkflowState(resolved);
+  }
+
+  async unblockStep(
+    workflowRunId: string,
+    stepRunId: string,
+    input: UnblockStepInput,
+    clientId: string,
+    actorId: string,
+  ): Promise<Result<SafeWorkflowState, ErrorCode>> {
+    const run = await this.runRepo.findById(workflowRunId);
+    if (!run) return err('WORKFLOW_RUN_NOT_FOUND', `Workflow run ${workflowRunId} not found`);
+
+    if (run.status !== 'BLOCKED') {
+      return err('WORKFLOW_INVALID_TRANSITION', `Cannot unblock a run in status "${run.status}" — run must be BLOCKED`);
+    }
+
+    if (run.clientId !== clientId) {
+      return err('FORBIDDEN', 'Access denied — workflow run belongs to a different client');
+    }
+
+    const stepRun = await this.runRepo.findStepRunById(stepRunId);
+    if (!stepRun || stepRun.workflowRunId !== workflowRunId) {
+      return err('WORKFLOW_STEP_NOT_FOUND', `Step run ${stepRunId} not found in run ${workflowRunId}`);
+    }
+
+    if (stepRun.status !== 'BLOCKED') {
+      return err('WORKFLOW_INVALID_TRANSITION', `Cannot unblock a step in status "${stepRun.status}" — step must be BLOCKED`);
+    }
+
+    if (input.operatorNotes !== undefined) {
+      const v = checkText(input.operatorNotes);
+      if (v) return err('WORKFLOW_UNSAFE_TEXT', `operatorNotes rejected: ${v}`);
+    }
+
+    await this.runRepo.updateStepStatus(stepRunId, {
+      status: 'READY',
+      ...(input.operatorNotes !== undefined ? { operatorNotes: input.operatorNotes } : {}),
+    });
+
+    const newRunStatus: WorkflowRunStatus =
+      stepRun.stepKind === 'WAIT_FOR_CONFIRMATION' ? 'WAITING' : 'IN_PROGRESS';
+    const updatedRun = await this.runRepo.updateRunStatus(workflowRunId, { status: newRunStatus });
+
+    const task = await this.taskRepo.findById(run.taskId);
+
+    const auditResult = await this.audit.write({
+      eventType: 'WORKFLOW_STEP_UNBLOCKED',
+      actorId,
+      actorType: 'OPERATOR',
+      clientId,
+      resourceId: workflowRunId,
+      resourceType: 'TaskWorkflowRun',
+      outcome: 'ALLOWED',
+      metadata: { taskId: run.taskId, stepRunId, stepOrder: stepRun.stepOrder },
+    });
+    if (!auditResult.ok) return auditResult;
+
+    if (task) {
+      await this.timeline.append({
+        caseId: task.caseId,
+        taskId: run.taskId,
+        eventType: 'WORKFLOW_STEP_UNBLOCKED',
+        actorId,
+        actorType: 'OPERATOR',
+        note: `Step ${stepRun.stepOrder} unblocked`,
+      });
+    }
+
+    return this._buildWorkflowState(updatedRun);
+  }
+
+  async cancelWorkflow(
+    workflowRunId: string,
+    input: CancelWorkflowInput,
+    clientId: string,
+    actorId: string,
+  ): Promise<Result<SafeWorkflowState, ErrorCode>> {
+    const run = await this.runRepo.findById(workflowRunId);
+    if (!run) return err('WORKFLOW_RUN_NOT_FOUND', `Workflow run ${workflowRunId} not found`);
+
+    if (TERMINAL_RUN_STATUSES.includes(run.status)) {
+      return err('WORKFLOW_INVALID_TRANSITION', `Cannot cancel a workflow run in terminal status "${run.status}"`);
+    }
+
+    if (run.clientId !== clientId) {
+      return err('FORBIDDEN', 'Access denied — workflow run belongs to a different client');
+    }
+
+    const reasonViolation = checkText(input.reason);
+    if (reasonViolation) return err('WORKFLOW_UNSAFE_TEXT', `reason rejected: ${reasonViolation}`);
+
+    const allStepRuns = await this.runRepo.listStepRunsForRun(workflowRunId);
+    const toSkip = allStepRuns.filter((sr) => !['COMPLETED', 'SKIPPED', 'FAILED'].includes(sr.status));
+    for (const sr of toSkip) {
+      await this.runRepo.updateStepStatus(sr.id, { status: 'SKIPPED' });
+    }
+
+    const now = new Date();
+    const updatedRun = await this.runRepo.updateRunStatus(workflowRunId, {
+      status: 'CANCELLED',
+      completedAt: now,
+    });
+
+    const task = await this.taskRepo.findById(run.taskId);
+
+    const auditResult = await this.audit.write({
+      eventType: 'WORKFLOW_CANCELLED',
+      actorId,
+      actorType: 'OPERATOR',
+      clientId,
+      resourceId: workflowRunId,
+      resourceType: 'TaskWorkflowRun',
+      outcome: 'ALLOWED',
+      metadata: { taskId: run.taskId, skippedCount: toSkip.length },
+    });
+    if (!auditResult.ok) return auditResult;
+
+    if (task) {
+      await this.timeline.append({
+        caseId: task.caseId,
+        taskId: run.taskId,
+        eventType: 'WORKFLOW_CANCELLED',
+        actorId,
+        actorType: 'OPERATOR',
+        note: `Workflow cancelled — ${toSkip.length} step(s) skipped`,
+      });
+    }
+
+    return this._buildWorkflowState(updatedRun);
+  }
+
+  async setPlaybookStatus(
+    playbookId: string,
+    status: PlaybookStatus,
+    actorId: string,
+  ): Promise<Result<SafePlaybook, ErrorCode>> {
+    const playbook = await this.playbookRepo.findById(playbookId);
+    if (!playbook) return err('PLAYBOOK_NOT_FOUND', `Playbook ${playbookId} not found`);
+
+    if (playbook.status === 'DEPRECATED') {
+      return err('WORKFLOW_INVALID_TRANSITION', `Cannot change status of a DEPRECATED playbook`);
+    }
+
+    if (playbook.status === status) {
+      return err('WORKFLOW_INVALID_TRANSITION', `Playbook is already in status "${status}"`);
+    }
+
+    const updated = await this.playbookRepo.setStatus(playbookId, status);
+
+    const auditResult = await this.audit.write({
+      eventType: 'WORKFLOW_PLAYBOOK_STATUS_CHANGED',
+      actorId,
+      actorType: 'OPERATOR',
+      resourceId: playbookId,
+      resourceType: 'RemovalPlaybook',
+      outcome: 'ALLOWED',
+      metadata: { from: playbook.status, to: status },
+    });
+    if (!auditResult.ok) return auditResult;
+
+    return ok(toSafePlaybook(updated));
+  }
+
+  async listWorkflowRunsForClient(clientId: string): Promise<SafeWorkflowRunHeader[]> {
+    const runs = await this.runRepo.listForClient(clientId);
+    return runs.map(toSafeRunHeader);
   }
 
   async listPlaybooks(): Promise<SafePlaybook[]> {

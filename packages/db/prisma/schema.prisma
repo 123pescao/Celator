@@ -308,8 +308,11 @@ model Client {
   portalEvents          ClientPortalEvent[]
   dataDeletionRequests  ClientDataDeletionRequest[]
   dekRotationJobs       DekRotationJob[]
-  manualSubmissions     ManualRemovalSubmission[]
-  workflowRuns          TaskWorkflowRun[]
+  manualSubmissions        ManualRemovalSubmission[]
+  workflowRuns             TaskWorkflowRun[]
+  evidenceRecords          EvidenceRecord[]
+  removalRequestPackets    RemovalRequestPacket[]
+  followUpReminders        FollowUpReminder[]
 
   @@index([organizationId])
   @@index([status])
@@ -502,6 +505,8 @@ model CleanupTask {
   timelineEvents   CaseTimelineEvent[]   @relation("TaskTimeline")
   manualSubmissions ManualRemovalSubmission[]
   workflowRuns     TaskWorkflowRun[]
+  removalRequestPackets RemovalRequestPacket[]
+  followUpReminders     FollowUpReminder[]
 
   @@index([caseId, status])
   @@index([status])
@@ -730,9 +735,10 @@ model CaseTimelineEvent {
 model EvidenceRecord {
   id              String   @id @default(cuid())
   taskId          String
+  clientId        String?  // Phase 2C: direct client scope for ownership checks
   storageKey      String   // Object storage path — not the content
-  contentHash     String   // SHA-256 of stored content
-  evidenceType    String   // "SCREENSHOT", "EMAIL", "CONFIRMATION", "VERIFICATION"
+  contentHash     String   // SHA-256 of stored content; server-computed, not caller-supplied
+  evidenceType    String   // validated at service layer: SCREENSHOT, CONFIRMATION_CODE, EMAIL_RESPONSE, WEB_FORM_RECEIPT, MANUAL_NOTE, OTHER
   mimeType        String?
   sizeBytes       Int?
   isImmutable     Boolean  @default(false)
@@ -740,10 +746,12 @@ model EvidenceRecord {
   createdAt       DateTime @default(now())
 
   task             CleanupTask            @relation(fields: [taskId], references: [id])
+  client           Client?                @relation(fields: [clientId], references: [id])
   evidenceHolds    SnapshotEvidenceHold[]
   workflowStepRuns TaskWorkflowStepRun[]
 
   @@index([taskId])
+  @@index([clientId])
   @@map("evidence_records")
 }
 
@@ -1048,10 +1056,104 @@ model DataSourceTarget {
   createdAt            DateTime     @default(now())  @map("created_at")
   updatedAt            DateTime     @updatedAt       @map("updated_at")
 
-  cleanupTasks            CleanupTask[]
+  cleanupTasks             CleanupTask[]
   manualRemovalSubmissions ManualRemovalSubmission[]
-  playbooks               RemovalPlaybook[]
+  playbooks                RemovalPlaybook[]
+  removalRequestPackets    RemovalRequestPacket[]
 
   @@index([sourceType, isActive])
   @@map("data_source_targets")
+}
+
+// =============================================================
+// REMOVAL REQUEST PACKETS (Phase 2B)
+// =============================================================
+
+enum PacketStatus {
+  DRAFT
+  READY
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum PacketItemStatus {
+  PENDING
+  COMPLETED
+  BLOCKED
+  SKIPPED
+}
+
+model RemovalRequestPacket {
+  id                 String       @id @default(cuid())
+  taskId             String       @map("task_id")
+  clientId           String       @map("client_id")
+  dataSourceTargetId String?      @map("data_source_target_id")
+  status             PacketStatus @default(DRAFT)
+  redactedSummary    String       @map("redacted_summary")
+  preparedByUserId   String?      @map("prepared_by_user_id")
+  createdAt          DateTime     @default(now()) @map("created_at")
+  updatedAt          DateTime     @updatedAt       @map("updated_at")
+
+  task             CleanupTask               @relation(fields: [taskId], references: [id])
+  client           Client                    @relation(fields: [clientId], references: [id])
+  dataSourceTarget DataSourceTarget?         @relation(fields: [dataSourceTargetId], references: [id])
+  items            RemovalRequestPacketItem[]
+
+  @@index([taskId])
+  @@index([clientId, createdAt])
+  @@index([status])
+  @@map("removal_request_packets")
+}
+
+model RemovalRequestPacketItem {
+  id                String           @id @default(cuid())
+  packetId          String           @map("packet_id")
+  itemOrder         Int              @map("item_order")
+  itemKind          String           @map("item_kind")
+  label             String
+  status            PacketItemStatus @default(PENDING)
+  requiredFieldType String?          @map("required_field_type")
+  operatorNotes     String?          @map("operator_notes")
+  completedAt       DateTime?        @map("completed_at")
+  createdAt         DateTime         @default(now()) @map("created_at")
+
+  packet RemovalRequestPacket @relation(fields: [packetId], references: [id])
+
+  @@unique([packetId, itemOrder])
+  @@index([packetId])
+  @@map("removal_request_packet_items")
+}
+
+// =============================================================
+// FOLLOW-UP REMINDERS (Phase 2C)
+// =============================================================
+
+enum FollowUpStatus {
+  PENDING
+  DUE
+  COMPLETED
+  CANCELLED
+}
+
+model FollowUpReminder {
+  id                String         @id @default(cuid())
+  taskId            String         @map("task_id")
+  clientId          String         @map("client_id")
+  status            FollowUpStatus @default(PENDING)
+  dueAt             DateTime       @map("due_at")
+  safeNote          String?        @map("safe_note")
+  completedAt       DateTime?      @map("completed_at")
+  cancelledAt       DateTime?      @map("cancelled_at")
+  createdByUserId   String?        @map("created_by_user_id")
+  createdAt         DateTime       @default(now()) @map("created_at")
+  updatedAt         DateTime       @updatedAt       @map("updated_at")
+
+  task   CleanupTask @relation(fields: [taskId], references: [id])
+  client Client      @relation(fields: [clientId], references: [id])
+
+  @@index([taskId])
+  @@index([clientId, dueAt])
+  @@index([status, dueAt])
+  @@map("follow_up_reminders")
 }

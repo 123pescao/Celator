@@ -48,9 +48,31 @@ export type {
   AdvanceStepInput,
   BlockStepInput,
   AttachManualSubmissionInput,
+  UnblockStepInput,
+  CancelWorkflowInput,
   SafePlaybook,
   SafePlaybookStep,
   SafePlaybookWithSteps,
   SafeWorkflowStepRun,
   SafeWorkflowState,
+  SafeWorkflowRunHeader,
 } from './workflow-engine.service.js';
+export { RemovalRequestPacketService } from './removal-request-packet.service.js';
+export type {
+  GeneratePacketInput,
+  SafePacketItem,
+  SafePacketHeader,
+  SafePacketWithItems,
+} from './removal-request-packet.service.js';
+export { EvidenceService } from './evidence.service.js';
+export type {
+  RegisterEvidenceInput,
+  SafeEvidenceRecord,
+  EvidenceType,
+} from './evidence.service.js';
+export { VALID_EVIDENCE_TYPES } from './evidence.service.js';
+export { FollowUpReminderService } from './follow-up-reminder.service.js';
+export type {
+  CreateFollowUpInput,
+  SafeFollowUp,
+} from './follow-up-reminder.service.js';

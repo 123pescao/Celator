@@ -13,3 +13,5 @@
 export * from './result.js';
 export * from './errors.js';
 export * from './services/index.js';
+export { PLAYBOOK_DEFINITIONS } from './playbook-library.js';
+export type { PlaybookDef, PlaybookStepDef } from './playbook-library.js';

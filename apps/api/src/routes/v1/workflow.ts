@@ -57,6 +57,20 @@ const AttachManualSubmissionBody = z.object({
   manualSubmissionId: z.string().min(1),
 });
 
+const UnblockStepBody = z.object({
+  clientId: z.string().min(1),
+  operatorNotes: z.string().max(2000).optional(),
+});
+
+const CancelWorkflowBody = z.object({
+  clientId: z.string().min(1),
+  reason: z.string().min(1).max(2000),
+});
+
+const PatchPlaybookStatusBody = z.object({
+  status: z.enum(['ACTIVE', 'INACTIVE', 'DEPRECATED']),
+});
+
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
 export const workflowRoutes: FastifyPluginAsync<{
@@ -207,5 +221,81 @@ export const workflowRoutes: FastifyPluginAsync<{
     );
     if (!result.ok) return reply.code(400).send({ ok: false, error: result.error, message: result.message });
     return reply.send({ ok: true, workflowState: result.value });
+  });
+
+  // POST /workflow-runs/:workflowRunId/steps/:stepRunId/unblock — unblock a blocked step
+  fastify.post('/workflow-runs/:workflowRunId/steps/:stepRunId/unblock', async (request, reply) => {
+    const { workflowRunId, stepRunId } = request.params as { workflowRunId: string; stepRunId: string };
+    const ctx = await requireDevActor(request, reply, userRepo);
+    if (!ctx) return;
+
+    const body = UnblockStepBody.safeParse(request.body);
+    if (!body.success) {
+      return reply.code(400).send({ ok: false, error: 'VALIDATION_ERROR', details: body.error.flatten() });
+    }
+    const { clientId, operatorNotes } = body.data;
+    const result = await workflowEngineService.unblockStep(
+      workflowRunId,
+      stepRunId,
+      { ...(operatorNotes !== undefined ? { operatorNotes } : {}) },
+      clientId,
+      ctx.actor.id,
+    );
+    if (!result.ok) {
+      const code = result.error === 'WORKFLOW_RUN_NOT_FOUND' || result.error === 'WORKFLOW_STEP_NOT_FOUND' ? 404 : 400;
+      return reply.code(code).send({ ok: false, error: result.error, message: result.message });
+    }
+    return reply.send({ ok: true, workflowState: result.value });
+  });
+
+  // POST /workflow-runs/:workflowRunId/cancel — cancel a workflow run
+  fastify.post('/workflow-runs/:workflowRunId/cancel', async (request, reply) => {
+    const { workflowRunId } = request.params as { workflowRunId: string };
+    const ctx = await requireDevActor(request, reply, userRepo);
+    if (!ctx) return;
+
+    const body = CancelWorkflowBody.safeParse(request.body);
+    if (!body.success) {
+      return reply.code(400).send({ ok: false, error: 'VALIDATION_ERROR', details: body.error.flatten() });
+    }
+    const { clientId, reason } = body.data;
+    const result = await workflowEngineService.cancelWorkflow(
+      workflowRunId,
+      { reason },
+      clientId,
+      ctx.actor.id,
+    );
+    if (!result.ok) {
+      const code = result.error === 'WORKFLOW_RUN_NOT_FOUND' ? 404 : 400;
+      return reply.code(code).send({ ok: false, error: result.error, message: result.message });
+    }
+    return reply.send({ ok: true, workflowState: result.value });
+  });
+
+  // PATCH /removal-playbooks/:playbookId/status — change playbook status
+  fastify.patch('/removal-playbooks/:playbookId/status', async (request, reply) => {
+    const { playbookId } = request.params as { playbookId: string };
+    const ctx = await requireDevActor(request, reply, userRepo);
+    if (!ctx) return;
+
+    const body = PatchPlaybookStatusBody.safeParse(request.body);
+    if (!body.success) {
+      return reply.code(400).send({ ok: false, error: 'VALIDATION_ERROR', details: body.error.flatten() });
+    }
+    const result = await workflowEngineService.setPlaybookStatus(playbookId, body.data.status, ctx.actor.id);
+    if (!result.ok) {
+      const code = result.error === 'PLAYBOOK_NOT_FOUND' ? 404 : 400;
+      return reply.code(code).send({ ok: false, error: result.error, message: result.message });
+    }
+    return reply.send({ ok: true, playbook: result.value });
+  });
+
+  // GET /clients/:clientId/workflow-runs — list workflow run headers for a client
+  fastify.get('/clients/:clientId/workflow-runs', async (request, reply) => {
+    const { clientId } = request.params as { clientId: string };
+    const ctx = await requireDevActor(request, reply, userRepo);
+    if (!ctx) return;
+    const runs = await workflowEngineService.listWorkflowRunsForClient(clientId);
+    return reply.send({ ok: true, runs });
   });
 };

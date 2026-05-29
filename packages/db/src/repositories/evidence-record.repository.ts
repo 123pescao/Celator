@@ -21,4 +21,15 @@ export class EvidenceRecordRepository {
   async findManyByIds(ids: string[]): Promise<EvidenceRecord[]> {
     return this.db.evidenceRecord.findMany({ where: { id: { in: ids } } });
   }
+
+  async listForTaskScoped(taskId: string, clientId: string): Promise<EvidenceRecord[]> {
+    return this.db.evidenceRecord.findMany({
+      where: { taskId, clientId },
+      orderBy: { createdAt: 'asc' },
+    });
+  }
+
+  async markImmutable(id: string): Promise<EvidenceRecord> {
+    return this.db.evidenceRecord.update({ where: { id }, data: { isImmutable: true } });
+  }
 }
