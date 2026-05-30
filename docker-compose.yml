@@ -6,15 +6,15 @@ services:
     container_name: celator_postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: celator
-      POSTGRES_PASSWORD: celator
-      POSTGRES_DB: celator
+      POSTGRES_USER: ${POSTGRES_USER:-celator}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-celator}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - celator_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U celator -d celator"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-celator} -d $${POSTGRES_DB:-celator}"]
       interval: 5s
       timeout: 5s
       retries: 10
