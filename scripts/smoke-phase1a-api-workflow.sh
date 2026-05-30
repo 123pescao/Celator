@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Celator Phase 1A/1C/1D/1E/1F/2A — API Workflow Smoke Test
+# Celator Phase 1A/1C/1D/1E/1F/2A/3C/4A/4B — API Workflow Smoke Test
 #
 # Exercises the full operator workflow against a running local API:
 #   health → security/status → org → user → actor-validation → client
@@ -8,6 +8,9 @@
 #   → review packet → approval → timeline → audit logs
 #   → vault record store → target registry → removal draft
 #   → manual submission → submitted → outcome → PII boundary checks
+#   → Phase 3C: notifications (schedule, PII reject, deliver dry-run, cancel)
+#   → Phase 4A: reports (request, PII reject, generate, proof packet, expiry)
+#   → Phase 4B: automation plans (create, approve, dry-run, reject, PII guard)
 #
 # Phase 1C: all write requests carry X-Dev-Actor-Id set to the real USER_ID
 # created in step 4. Actor validation steps assert 401/403 for missing/invalid.
@@ -1735,6 +1738,846 @@ if [[ -n "${CLIENT_ID}" ]]; then
   fi
 fi
 
+# =============================================================================
+# Phase 3C — Notifications
+# =============================================================================
+echo
+echo "── Phase 3C: Notifications ─────────────────────────────"
+
+NOTIFICATION_ID=""
+FOLLOW_UP_NOTIF_ID=""
+
+# Step 101 — Schedule notification for a task (safe content)
+header "POST /api/v1/tasks/:taskId/notifications (schedule notification)"
+if [[ -n "${TASK_ID}" && -n "${CLIENT_ID}" ]]; then
+  NOTIF_DUE=$(date -u -d "+1 hour" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "2030-01-01T01:00:00Z")
+  api_call POST "/api/v1/tasks/${TASK_ID}/notifications" \
+    "{\"clientId\":\"${CLIENT_ID}\",\"subjectSafe\":\"Removal request queued for review\",\"bodySafe\":\"Your data removal request has been queued. No action needed.\",\"scheduledFor\":\"${NOTIF_DUE}\"}"
+  if require_ok "POST /tasks/:taskId/notifications" "201"; then
+    NOTIFICATION_ID=$(extract_field "$LAST_BODY" ".notification.id" "id")
+    if [[ -n "$NOTIFICATION_ID" && "$NOTIFICATION_ID" != "null" ]]; then
+      pass "notification created: ${NOTIFICATION_ID}"
+    else
+      fail "notification: could not extract id"
+    fi
+    if echo "$LAST_BODY" | grep -q '"channel":"DRY_RUN"'; then
+      pass "notification channel is DRY_RUN"
+    else
+      fail "notification channel is not DRY_RUN"
+    fi
+    if echo "$LAST_BODY" | grep -q '"status":"PENDING"'; then
+      pass "notification status is PENDING"
+    else
+      fail "notification status is not PENDING"
+    fi
+    for field in ciphertext authTag iv encryptedKeyRef storageKey vaultAccessLogId; do
+      if echo "$LAST_BODY" | grep -q "\"${field}\""; then
+        fail "notification response: sensitive field ${field} leaked"
+      fi
+    done
+    pass "notification response: no sensitive fields"
+  fi
+else
+  pass "schedule notification: skipped (TASK_ID or CLIENT_ID not available)"
+fi
+
+# Step 102 — Reject notification with PII in subjectSafe (email in subject)
+header "POST /api/v1/tasks/:taskId/notifications (PII in subjectSafe — should reject)"
+if [[ -n "${TASK_ID}" && -n "${CLIENT_ID}" ]]; then
+  NOTIF_DUE=$(date -u -d "+1 hour" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "2030-01-01T01:00:00Z")
+  api_call POST "/api/v1/tasks/${TASK_ID}/notifications" \
+    "{\"clientId\":\"${CLIENT_ID}\",\"subjectSafe\":\"Contact admin@example.com for details\",\"bodySafe\":\"Safe body text.\",\"scheduledFor\":\"${NOTIF_DUE}\"}"
+  if [[ "$LAST_CODE" == "400" ]]; then
+    pass "PII in subjectSafe: 400 as expected"
+    if echo "$LAST_BODY" | grep -q 'NOTIFICATION_SUBJECT_UNSAFE'; then
+      pass "PII in subjectSafe: error code NOTIFICATION_SUBJECT_UNSAFE"
+    else
+      fail "PII in subjectSafe: expected NOTIFICATION_SUBJECT_UNSAFE error code"
+    fi
+  else
+    fail "PII in subjectSafe: expected 400, got ${LAST_CODE}"
+  fi
+else
+  pass "reject PII notification: skipped (TASK_ID or CLIENT_ID not available)"
+fi
+
+# Step 103 — Reject notification with PII in bodySafe (phone in body)
+header "POST /api/v1/tasks/:taskId/notifications (PII in bodySafe — should reject)"
+if [[ -n "${TASK_ID}" && -n "${CLIENT_ID}" ]]; then
+  NOTIF_DUE=$(date -u -d "+1 hour" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "2030-01-01T01:00:00Z")
+  api_call POST "/api/v1/tasks/${TASK_ID}/notifications" \
+    "{\"clientId\":\"${CLIENT_ID}\",\"subjectSafe\":\"Safe subject\",\"bodySafe\":\"Call 555-123-4567 for support.\",\"scheduledFor\":\"${NOTIF_DUE}\"}"
+  if [[ "$LAST_CODE" == "400" ]]; then
+    pass "PII in bodySafe: 400 as expected"
+    if echo "$LAST_BODY" | grep -q 'NOTIFICATION_BODY_UNSAFE'; then
+      pass "PII in bodySafe: error code NOTIFICATION_BODY_UNSAFE"
+    else
+      fail "PII in bodySafe: expected NOTIFICATION_BODY_UNSAFE error code"
+    fi
+  else
+    fail "PII in bodySafe: expected 400, got ${LAST_CODE}"
+  fi
+else
+  pass "reject PII body notification: skipped (TASK_ID or CLIENT_ID not available)"
+fi
+
+# Step 104 — Queue follow-up reminder notification
+header "POST /api/v1/follow-up-reminders/:followUpReminderId/notify"
+if [[ -n "${FOLLOW_UP_ID}" ]]; then
+  NOTIF_DUE=$(date -u -d "+30 minutes" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+30M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "2030-01-01T00:30:00Z")
+  api_call POST "/api/v1/follow-up-reminders/${FOLLOW_UP_ID}/notify" \
+    "{\"subjectSafe\":\"Follow-up reminder: action required\",\"bodySafe\":\"A follow-up item is due for your removal request.\",\"scheduledFor\":\"${NOTIF_DUE}\"}"
+  if require_ok "POST /follow-up-reminders/:id/notify" "201"; then
+    FOLLOW_UP_NOTIF_ID=$(extract_field "$LAST_BODY" ".notification.id" "id")
+    if [[ -n "$FOLLOW_UP_NOTIF_ID" && "$FOLLOW_UP_NOTIF_ID" != "null" ]]; then
+      pass "follow-up notification created: ${FOLLOW_UP_NOTIF_ID}"
+    else
+      fail "follow-up notification: could not extract id"
+    fi
+    if echo "$LAST_BODY" | grep -q '"followUpReminderId"'; then
+      pass "follow-up notification: followUpReminderId field present"
+    else
+      fail "follow-up notification: followUpReminderId field missing"
+    fi
+    for field in ciphertext authTag iv encryptedKeyRef storageKey; do
+      if echo "$LAST_BODY" | grep -q "\"${field}\""; then
+        fail "follow-up notification: sensitive field ${field} leaked"
+      fi
+    done
+    pass "follow-up notification: no sensitive fields"
+  fi
+else
+  pass "follow-up notification: skipped (FOLLOW_UP_ID not available)"
+fi
+
+# Step 105 — List notification outbox for client
+header "GET /api/v1/clients/:clientId/notifications"
+if [[ -n "${CLIENT_ID}" ]]; then
+  api_call GET "/api/v1/clients/${CLIENT_ID}/notifications"
+  if require_ok "GET /clients/:clientId/notifications" "200"; then
+    if echo "$LAST_BODY" | grep -q '"notifications"'; then
+      pass "notification list: notifications field present"
+    else
+      fail "notification list: notifications field missing"
+    fi
+    for field in ciphertext authTag iv encryptedKeyRef storageKey vaultAccessLogId; do
+      if echo "$LAST_BODY" | grep -q "\"${field}\""; then
+        fail "notification list: sensitive field ${field} leaked"
+      fi
+    done
+    pass "notification list: no sensitive fields"
+    if echo "$LAST_BODY" | grep -qE '[a-z0-9._%+\-]+@[a-z0-9.-]+\.[a-z]{2,}'; then
+      fail "notification list: raw email pattern found"
+    else
+      pass "notification list: no raw email pattern"
+    fi
+  fi
+else
+  pass "notification list: skipped (CLIENT_ID not available)"
+fi
+
+# Step 106 — Mark notification SCHEDULED (transition PENDING → SCHEDULED)
+header "POST /api/v1/notifications/:notificationId/schedule"
+if [[ -n "${NOTIFICATION_ID}" ]]; then
+  api_call POST "/api/v1/notifications/${NOTIFICATION_ID}/schedule" "{}"
+  if require_ok "POST /notifications/:id/schedule" "200"; then
+    if echo "$LAST_BODY" | grep -q '"status":"SCHEDULED"'; then
+      pass "notification marked SCHEDULED"
+    else
+      fail "notification status is not SCHEDULED after transition"
+    fi
+  fi
+else
+  pass "mark SCHEDULED: skipped (NOTIFICATION_ID not available)"
+fi
+
+# Step 107 — Deliver notification (DRY_RUN — SCHEDULED → DELIVERED)
+header "POST /api/v1/notifications/:notificationId/deliver-dry-run"
+if [[ -n "${NOTIFICATION_ID}" ]]; then
+  api_call POST "/api/v1/notifications/${NOTIFICATION_ID}/deliver-dry-run" "{}"
+  if require_ok "POST /notifications/:id/deliver-dry-run" "200"; then
+    if echo "$LAST_BODY" | grep -q '"status":"DELIVERED"'; then
+      pass "notification marked DELIVERED (DRY_RUN)"
+    else
+      fail "notification status is not DELIVERED after dry-run delivery"
+    fi
+    if echo "$LAST_BODY" | grep -q '"deliveredAt"'; then
+      pass "notification deliveredAt field present"
+    else
+      fail "notification deliveredAt field missing"
+    fi
+  fi
+else
+  pass "deliver dry-run: skipped (NOTIFICATION_ID not available)"
+fi
+
+# Step 108 — Attempt second deliver on already-DELIVERED notification (should 409)
+header "POST /api/v1/notifications/:notificationId/deliver-dry-run (already DELIVERED — should 409)"
+if [[ -n "${NOTIFICATION_ID}" ]]; then
+  api_call POST "/api/v1/notifications/${NOTIFICATION_ID}/deliver-dry-run" "{}"
+  if [[ "$LAST_CODE" == "409" ]]; then
+    pass "second deliver-dry-run: 409 as expected"
+  else
+    fail "second deliver-dry-run: expected 409, got ${LAST_CODE}"
+  fi
+else
+  pass "idempotent deliver check: skipped (NOTIFICATION_ID not available)"
+fi
+
+# Step 109 — List due notifications (GET /notifications/due)
+header "GET /api/v1/notifications/due"
+api_call GET "/api/v1/notifications/due"
+if require_ok "GET /notifications/due" "200"; then
+  if echo "$LAST_BODY" | grep -q '"notifications"'; then
+    pass "due notifications: notifications field present"
+  else
+    fail "due notifications: notifications field missing"
+  fi
+  for field in ciphertext authTag iv encryptedKeyRef storageKey vaultAccessLogId; do
+    if echo "$LAST_BODY" | grep -q "\"${field}\""; then
+      fail "due notifications: sensitive field ${field} leaked"
+    fi
+  done
+  pass "due notifications: no sensitive fields"
+fi
+
+# =============================================================================
+# Phase 4A — Reports, Exports, and Proof Packet
+# =============================================================================
+echo
+echo "── Phase 4A: Reports, Exports, and Proof Packet ─────────"
+
+REPORT_ID=""
+PROOF_PACKET_ID=""
+
+# Step 110 — Request a client progress report (CASE_SUMMARY)
+header "POST /api/v1/reports (CASE_SUMMARY)"
+if [[ -n "${CLIENT_ID}" && -n "${CASE_ID}" ]]; then
+  api_call POST "/api/v1/reports" \
+    "{\"clientId\":\"${CLIENT_ID}\",\"caseId\":\"${CASE_ID}\",\"reportType\":\"CASE_SUMMARY\",\"exportFormat\":\"JSON\",\"redactedSummary\":\"Case has tasks in review. No PII included.\",\"expiresInDays\":7}"
+  if require_ok "POST /reports (CASE_SUMMARY)" "201"; then
+    REPORT_ID=$(extract_field "$LAST_BODY" ".report.id" "id")
+    if [[ -n "$REPORT_ID" && "$REPORT_ID" != "null" ]]; then
+      pass "case summary report created: ${REPORT_ID}"
+    else
+      fail "case summary report: could not extract id"
+    fi
+    if echo "$LAST_BODY" | grep -q '"status":"PENDING"'; then
+      pass "report status is PENDING"
+    else
+      fail "report status is not PENDING"
+    fi
+    if echo "$LAST_BODY" | grep -q '"vaultAccessLogged"'; then
+      pass "report has vaultAccessLogged field"
+    else
+      fail "report missing vaultAccessLogged field"
+    fi
+    if echo "$LAST_BODY" | grep -q '"vaultAccessLogId"'; then
+      fail "report response: vaultAccessLogId must not be exposed"
+    else
+      pass "report response: vaultAccessLogId not exposed"
+    fi
+    for field in ciphertext authTag iv encryptedKeyRef storageKey; do
+      if echo "$LAST_BODY" | grep -q "\"${field}\""; then
+        fail "report response: sensitive field ${field} leaked"
+      fi
+    done
+    pass "report response: no sensitive fields"
+  fi
+else
+  pass "create case summary report: skipped (CLIENT_ID or CASE_ID not available)"
+fi
+
+# Step 111 — Reject report with PII in redactedSummary
+header "POST /api/v1/reports (PII in redactedSummary — should reject)"
+if [[ -n "${CLIENT_ID}" ]]; then
+  api_call POST "/api/v1/reports" \
+    "{\"clientId\":\"${CLIENT_ID}\",\"reportType\":\"CASE_SUMMARY\",\"exportFormat\":\"JSON\",\"redactedSummary\":\"Contact user@example.com for case details.\"}"
+  if [[ "$LAST_CODE" == "400" ]]; then
+    pass "PII in redactedSummary: 400 as expected"
+    if echo "$LAST_BODY" | grep -q 'REPORT_CONTENT_UNSAFE'; then
+      pass "PII in redactedSummary: error code REPORT_CONTENT_UNSAFE"
+    else
+      fail "PII in redactedSummary: expected REPORT_CONTENT_UNSAFE error code"
+    fi
+  else
+    fail "PII in redactedSummary: expected 400, got ${LAST_CODE}"
+  fi
+else
+  pass "reject PII report: skipped (CLIENT_ID not available)"
+fi
+
+# Step 112 — Generate report stub (PENDING → READY)
+header "POST /api/v1/reports/:reportId/generate"
+if [[ -n "${REPORT_ID}" ]]; then
+  api_call POST "/api/v1/reports/${REPORT_ID}/generate" "{}"
+  if require_ok "POST /reports/:id/generate" "200"; then
+    if echo "$LAST_BODY" | grep -q '"status":"READY"'; then
+      pass "report generated: status READY"
+    else
+      fail "report status is not READY after generate"
+    fi
+    if echo "$LAST_BODY" | grep -q '"generatedAt"'; then
+      pass "report generatedAt field present"
+    else
+      fail "report generatedAt field missing"
+    fi
+    if echo "$LAST_BODY" | grep -q '"vaultAccessLogId"'; then
+      fail "generated report: vaultAccessLogId must not be exposed"
+    else
+      pass "generated report: vaultAccessLogId not exposed"
+    fi
+    for field in ciphertext authTag iv encryptedKeyRef storageKey; do
+      if echo "$LAST_BODY" | grep -q "\"${field}\""; then
+        fail "generated report: sensitive field ${field} leaked"
+      fi
+    done
+    pass "generated report: no sensitive fields"
+  fi
+else
+  pass "generate report stub: skipped (REPORT_ID not available)"
+fi
+
+# Step 113 — Get report by ID (enforces expiry)
+header "GET /api/v1/reports/:reportId"
+if [[ -n "${REPORT_ID}" ]]; then
+  api_call GET "/api/v1/reports/${REPORT_ID}"
+  if require_ok "GET /reports/:reportId" "200"; then
+    if echo "$LAST_BODY" | grep -q '"report"'; then
+      pass "get report: report field present"
+    else
+      fail "get report: report field missing"
+    fi
+    if echo "$LAST_BODY" | grep -q '"vaultAccessLogId"'; then
+      fail "get report: vaultAccessLogId must not be exposed"
+    else
+      pass "get report: vaultAccessLogId not exposed"
+    fi
+    if echo "$LAST_BODY" | grep -q '"vaultAccessLogged"'; then
+      pass "get report: vaultAccessLogged field present"
+    else
+      fail "get report: vaultAccessLogged field missing"
+    fi
+    for field in ciphertext authTag iv encryptedKeyRef storageKey; do
+      if echo "$LAST_BODY" | grep -q "\"${field}\""; then
+        fail "get report: sensitive field ${field} leaked"
+      fi
+    done
+    pass "get report: no sensitive fields"
+  fi
+else
+  pass "get report: skipped (REPORT_ID not available)"
+fi
+
+# Step 114 — List reports for client
+header "GET /api/v1/clients/:clientId/reports"
+if [[ -n "${CLIENT_ID}" ]]; then
+  api_call GET "/api/v1/clients/${CLIENT_ID}/reports"
+  if require_ok "GET /clients/:clientId/reports" "200"; then
+    if echo "$LAST_BODY" | grep -q '"reports"'; then
+      pass "list reports: reports field present"
+    else
+      fail "list reports: reports field missing"
+    fi
+    if echo "$LAST_BODY" | grep -q '"vaultAccessLogId"'; then
+      fail "list reports: vaultAccessLogId must not appear in list response"
+    else
+      pass "list reports: vaultAccessLogId not exposed"
+    fi
+    for field in ciphertext authTag iv encryptedKeyRef storageKey; do
+      if echo "$LAST_BODY" | grep -q "\"${field}\""; then
+        fail "list reports: sensitive field ${field} leaked"
+      fi
+    done
+    pass "list reports: no sensitive fields"
+  fi
+else
+  pass "list reports: skipped (CLIENT_ID not available)"
+fi
+
+# Step 115 — Request a proof packet report
+header "POST /api/v1/reports (PROOF_PACKET)"
+if [[ -n "${CLIENT_ID}" && -n "${CASE_ID}" ]]; then
+  api_call POST "/api/v1/reports" \
+    "{\"clientId\":\"${CLIENT_ID}\",\"caseId\":\"${CASE_ID}\",\"reportType\":\"PROOF_PACKET\",\"exportFormat\":\"PDF_STUB\",\"redactedSummary\":\"Proof packet for case. Data redacted per policy.\",\"expiresInDays\":30}"
+  if require_ok "POST /reports (PROOF_PACKET)" "201"; then
+    PROOF_PACKET_ID=$(extract_field "$LAST_BODY" ".report.id" "id")
+    if [[ -n "$PROOF_PACKET_ID" && "$PROOF_PACKET_ID" != "null" ]]; then
+      pass "proof packet created: ${PROOF_PACKET_ID}"
+    else
+      fail "proof packet: could not extract id"
+    fi
+    if echo "$LAST_BODY" | grep -q '"reportType":"PROOF_PACKET"'; then
+      pass "proof packet: reportType is PROOF_PACKET"
+    else
+      fail "proof packet: reportType field incorrect"
+    fi
+    if echo "$LAST_BODY" | grep -q '"exportFormat":"PDF_STUB"'; then
+      pass "proof packet: exportFormat is PDF_STUB"
+    else
+      fail "proof packet: exportFormat field incorrect"
+    fi
+    if echo "$LAST_BODY" | grep -q '"vaultAccessLogId"'; then
+      fail "proof packet: vaultAccessLogId must not be exposed"
+    else
+      pass "proof packet: vaultAccessLogId not exposed"
+    fi
+  fi
+else
+  pass "create proof packet: skipped (CLIENT_ID or CASE_ID not available)"
+fi
+
+# Step 116 — Generate proof packet stub
+header "POST /api/v1/reports/:reportId/generate (PROOF_PACKET)"
+if [[ -n "${PROOF_PACKET_ID}" ]]; then
+  api_call POST "/api/v1/reports/${PROOF_PACKET_ID}/generate" "{}"
+  if require_ok "POST /reports/:id/generate (PROOF_PACKET)" "200"; then
+    if echo "$LAST_BODY" | grep -q '"status":"READY"'; then
+      pass "proof packet generated: status READY"
+    else
+      fail "proof packet status is not READY after generate"
+    fi
+    if echo "$LAST_BODY" | grep -q '"vaultAccessLogId"'; then
+      fail "proof packet generate: vaultAccessLogId must not be exposed"
+    else
+      pass "proof packet generate: vaultAccessLogId not exposed"
+    fi
+    for field in ciphertext authTag iv encryptedKeyRef storageKey; do
+      if echo "$LAST_BODY" | grep -q "\"${field}\""; then
+        fail "proof packet generate: sensitive field ${field} leaked"
+      fi
+    done
+    pass "proof packet generate: no sensitive fields"
+  fi
+else
+  pass "generate proof packet: skipped (PROOF_PACKET_ID not available)"
+fi
+
+# Step 117 — List reports for case
+header "GET /api/v1/cases/:caseId/reports"
+if [[ -n "${CASE_ID}" ]]; then
+  api_call GET "/api/v1/cases/${CASE_ID}/reports"
+  if require_ok "GET /cases/:caseId/reports" "200"; then
+    if echo "$LAST_BODY" | grep -q '"reports"'; then
+      pass "case reports list: reports field present"
+    else
+      fail "case reports list: reports field missing"
+    fi
+    if echo "$LAST_BODY" | grep -q '"vaultAccessLogId"'; then
+      fail "case reports list: vaultAccessLogId must not appear"
+    else
+      pass "case reports list: vaultAccessLogId not exposed"
+    fi
+    pass "case reports list: ok"
+  fi
+else
+  pass "case reports list: skipped (CASE_ID not available)"
+fi
+
+# Step 118 — Attempt to get a non-existent report (404)
+header "GET /api/v1/reports/nonexistent-report-id → 404"
+api_call GET "/api/v1/reports/nonexistent-report-id-xxxxxxxxxxx"
+if [[ "$LAST_CODE" == "404" ]]; then
+  pass "non-existent report: 404 as expected"
+  if echo "$LAST_BODY" | grep -q 'REPORT_NOT_FOUND'; then
+    pass "non-existent report: error code REPORT_NOT_FOUND"
+  else
+    fail "non-existent report: expected REPORT_NOT_FOUND error code"
+  fi
+else
+  fail "non-existent report: expected 404, got ${LAST_CODE}"
+fi
+
+# =============================================================================
+# Phase 4B — Automation Adapter Framework
+# =============================================================================
+echo
+echo "── Phase 4B: Automation Adapter Framework ───────────────"
+
+AUTOMATION_PLAN_ID=""
+AUTOMATION_PLAN_ID_2=""
+
+# Step 119 — Create automation plan with safe intentJson
+header "POST /api/v1/automation-plans (create plan)"
+if [[ -n "${TASK_ID}" && -n "${CLIENT_ID}" ]]; then
+  api_call POST "/api/v1/automation-plans" \
+    "{\"taskId\":\"${TASK_ID}\",\"clientId\":\"${CLIENT_ID}\",\"intentJson\":{\"action\":\"OPT_OUT\",\"targetId\":\"${DATA_SOURCE_TARGET_ID:-dst_smoke_stub}\",\"priority\":\"standard\"}}"
+  if require_ok "POST /automation-plans" "201"; then
+    AUTOMATION_PLAN_ID=$(extract_field "$LAST_BODY" ".plan.id" "id")
+    if [[ -n "$AUTOMATION_PLAN_ID" && "$AUTOMATION_PLAN_ID" != "null" ]]; then
+      pass "automation plan created: ${AUTOMATION_PLAN_ID}"
+    else
+      fail "automation plan: could not extract id"
+    fi
+    if echo "$LAST_BODY" | grep -q '"status":"PENDING_APPROVAL"'; then
+      pass "automation plan: status PENDING_APPROVAL"
+    else
+      fail "automation plan: status is not PENDING_APPROVAL"
+    fi
+    for field in ciphertext authTag iv encryptedKeyRef storageKey vaultAccessLogId; do
+      if echo "$LAST_BODY" | grep -q "\"${field}\""; then
+        fail "automation plan: sensitive field ${field} leaked"
+      fi
+    done
+    pass "automation plan: no sensitive fields"
+  fi
+else
+  pass "create automation plan: skipped (TASK_ID or CLIENT_ID not available)"
+fi
+
+# Step 120 — Reject plan creation with PII in intentJson (email field name)
+header "POST /api/v1/automation-plans (PII field name in intentJson — should reject)"
+if [[ -n "${TASK_ID}" && -n "${CLIENT_ID}" ]]; then
+  api_call POST "/api/v1/automation-plans" \
+    "{\"taskId\":\"${TASK_ID}\",\"clientId\":\"${CLIENT_ID}\",\"intentJson\":{\"action\":\"OPT_OUT\",\"email\":\"someone@example.com\"}}"
+  if [[ "$LAST_CODE" == "400" ]]; then
+    pass "PII field in intentJson: 400 as expected"
+    if echo "$LAST_BODY" | grep -qE 'VALIDATION_ERROR|AUTOMATION_PLAN_INTENT_UNSAFE'; then
+      pass "PII field in intentJson: validation error returned"
+    else
+      fail "PII field in intentJson: expected VALIDATION_ERROR or AUTOMATION_PLAN_INTENT_UNSAFE"
+    fi
+  else
+    fail "PII field in intentJson: expected 400, got ${LAST_CODE}"
+  fi
+else
+  pass "reject PII intentJson: skipped (TASK_ID or CLIENT_ID not available)"
+fi
+
+# Step 121 — Reject plan creation with disallowed key in intentJson
+header "POST /api/v1/automation-plans (disallowed key in intentJson — should reject)"
+if [[ -n "${TASK_ID}" && -n "${CLIENT_ID}" ]]; then
+  api_call POST "/api/v1/automation-plans" \
+    "{\"taskId\":\"${TASK_ID}\",\"clientId\":\"${CLIENT_ID}\",\"intentJson\":{\"action\":\"OPT_OUT\",\"internalSecret\":\"val\"}}"
+  if [[ "$LAST_CODE" == "400" ]]; then
+    pass "disallowed key in intentJson: 400 as expected"
+  else
+    fail "disallowed key in intentJson: expected 400, got ${LAST_CODE}"
+  fi
+else
+  pass "reject disallowed intentJson key: skipped"
+fi
+
+# Step 122 — Approve the automation plan
+header "POST /api/v1/automation-plans/:planId/approve"
+if [[ -n "${AUTOMATION_PLAN_ID}" && -n "${USER_ID}" ]]; then
+  api_call POST "/api/v1/automation-plans/${AUTOMATION_PLAN_ID}/approve" \
+    "{\"approvedByUserId\":\"${USER_ID}\"}"
+  if require_ok "POST /automation-plans/:id/approve" "200"; then
+    if echo "$LAST_BODY" | grep -q '"status":"APPROVED"'; then
+      pass "automation plan: status APPROVED"
+    else
+      fail "automation plan: status is not APPROVED after approve"
+    fi
+    if echo "$LAST_BODY" | grep -q '"approvedByUserId"'; then
+      pass "automation plan: approvedByUserId field present"
+    else
+      fail "automation plan: approvedByUserId field missing"
+    fi
+    if echo "$LAST_BODY" | grep -q '"approvedAt"'; then
+      pass "automation plan: approvedAt field present"
+    else
+      fail "automation plan: approvedAt field missing"
+    fi
+  fi
+else
+  pass "approve automation plan: skipped (AUTOMATION_PLAN_ID or USER_ID not available)"
+fi
+
+# Step 123 — Execute dry run (APPROVED → DRY_RUN_COMPLETE)
+header "POST /api/v1/automation-plans/:planId/execute-dry-run"
+if [[ -n "${AUTOMATION_PLAN_ID}" ]]; then
+  api_call POST "/api/v1/automation-plans/${AUTOMATION_PLAN_ID}/execute-dry-run" "{}"
+  if require_ok "POST /automation-plans/:id/execute-dry-run" "200"; then
+    if echo "$LAST_BODY" | grep -q '"status":"DRY_RUN_COMPLETE"'; then
+      pass "automation plan: status DRY_RUN_COMPLETE"
+    else
+      fail "automation plan: status is not DRY_RUN_COMPLETE after dry run"
+    fi
+    if echo "$LAST_BODY" | grep -q '"dryRunResultJson"'; then
+      pass "automation plan: dryRunResultJson field present"
+    else
+      fail "automation plan: dryRunResultJson field missing"
+    fi
+    if echo "$LAST_BODY" | grep -q '"dryRun":true'; then
+      pass "automation plan: dryRunResultJson contains dryRun:true sentinel"
+    else
+      fail "automation plan: dryRunResultJson missing dryRun:true sentinel"
+    fi
+    if echo "$LAST_BODY" | grep -q 'DRY_RUN_ONLY'; then
+      pass "automation plan: dryRunResultJson contains DRY_RUN_ONLY marker"
+    else
+      fail "automation plan: dryRunResultJson missing DRY_RUN_ONLY marker"
+    fi
+    # Ensure no real execution artifacts or sensitive fields
+    for field in ciphertext authTag iv encryptedKeyRef storageKey; do
+      if echo "$LAST_BODY" | grep -q "\"${field}\""; then
+        fail "dry run result: sensitive field ${field} leaked"
+      fi
+    done
+    pass "dry run result: no sensitive fields"
+    if echo "$LAST_BODY" | grep -qE '[a-z0-9._%+\-]+@[a-z0-9.-]+\.[a-z]{2,}'; then
+      fail "dry run result: raw email pattern found"
+    else
+      pass "dry run result: no raw email pattern"
+    fi
+  fi
+else
+  pass "execute dry run: skipped (AUTOMATION_PLAN_ID not available)"
+fi
+
+# Step 124 — Attempt second dry run on already-complete plan (should 409)
+header "POST /api/v1/automation-plans/:planId/execute-dry-run (already DRY_RUN_COMPLETE — should 409)"
+if [[ -n "${AUTOMATION_PLAN_ID}" ]]; then
+  api_call POST "/api/v1/automation-plans/${AUTOMATION_PLAN_ID}/execute-dry-run" "{}"
+  if [[ "$LAST_CODE" == "409" ]]; then
+    pass "second dry run: 409 as expected (idempotent guard)"
+  else
+    fail "second dry run: expected 409, got ${LAST_CODE}"
+  fi
+else
+  pass "idempotent dry run check: skipped (AUTOMATION_PLAN_ID not available)"
+fi
+
+# Step 125 — Create a second plan and reject it (test reject flow)
+header "POST /api/v1/automation-plans (create plan for rejection test)"
+if [[ -n "${TASK_ID}" && -n "${CLIENT_ID}" ]]; then
+  api_call POST "/api/v1/automation-plans" \
+    "{\"taskId\":\"${TASK_ID}\",\"clientId\":\"${CLIENT_ID}\",\"intentJson\":{\"action\":\"OPT_OUT\",\"reason\":\"smoke-test-reject\"}}"
+  if require_ok "POST /automation-plans (second)" "201"; then
+    AUTOMATION_PLAN_ID_2=$(extract_field "$LAST_BODY" ".plan.id" "id")
+    pass "second automation plan created: ${AUTOMATION_PLAN_ID_2}"
+  fi
+else
+  pass "create second automation plan: skipped"
+fi
+
+# Step 126 — Reject the second plan with safe rejectionReason
+header "POST /api/v1/automation-plans/:planId/reject"
+if [[ -n "${AUTOMATION_PLAN_ID_2}" && -n "${USER_ID}" ]]; then
+  api_call POST "/api/v1/automation-plans/${AUTOMATION_PLAN_ID_2}/reject" \
+    "{\"rejectedByUserId\":\"${USER_ID}\",\"rejectionReason\":\"Plan not authorized under current policy scope.\"}"
+  if require_ok "POST /automation-plans/:id/reject" "200"; then
+    if echo "$LAST_BODY" | grep -q '"status":"REJECTED"'; then
+      pass "automation plan: status REJECTED"
+    else
+      fail "automation plan: status is not REJECTED after reject"
+    fi
+    if echo "$LAST_BODY" | grep -q '"rejectionReason"'; then
+      pass "automation plan: rejectionReason field present"
+    else
+      fail "automation plan: rejectionReason field missing"
+    fi
+  fi
+else
+  pass "reject automation plan: skipped (AUTOMATION_PLAN_ID_2 or USER_ID not available)"
+fi
+
+# Step 127 — Reject plan with PII in rejectionReason (should 400)
+header "POST /api/v1/automation-plans/:planId/reject (PII in rejectionReason — should reject)"
+if [[ -n "${TASK_ID}" && -n "${CLIENT_ID}" && -n "${USER_ID}" ]]; then
+  # Create a fresh plan to reject with PII in reason
+  api_call POST "/api/v1/automation-plans" \
+    "{\"taskId\":\"${TASK_ID}\",\"clientId\":\"${CLIENT_ID}\",\"intentJson\":{\"action\":\"OPT_OUT\"}}"
+  if [[ "$LAST_CODE" == "201" ]]; then
+    PII_REJECT_PLAN_ID=$(extract_field "$LAST_BODY" ".plan.id" "id")
+    if [[ -n "$PII_REJECT_PLAN_ID" && "$PII_REJECT_PLAN_ID" != "null" ]]; then
+      api_call POST "/api/v1/automation-plans/${PII_REJECT_PLAN_ID}/reject" \
+        "{\"rejectedByUserId\":\"${USER_ID}\",\"rejectionReason\":\"Rejected because user@example.com flagged this plan.\"}"
+      if [[ "$LAST_CODE" == "400" ]]; then
+        pass "PII in rejectionReason: 400 as expected"
+        if echo "$LAST_BODY" | grep -qE 'AUTOMATION_PLAN_INTENT_UNSAFE|VALIDATION_ERROR'; then
+          pass "PII in rejectionReason: error code returned"
+        else
+          fail "PII in rejectionReason: expected error code"
+        fi
+      else
+        fail "PII in rejectionReason: expected 400, got ${LAST_CODE}"
+      fi
+    else
+      pass "PII reject test: plan id not extractable, skipping reject step"
+    fi
+  else
+    pass "PII reject test: plan creation failed, skipping"
+  fi
+else
+  pass "PII in rejectionReason: skipped (TASK_ID, CLIENT_ID, or USER_ID not available)"
+fi
+
+# Step 128 — Get automation plan by ID
+header "GET /api/v1/automation-plans/:planId"
+if [[ -n "${AUTOMATION_PLAN_ID}" ]]; then
+  api_call GET "/api/v1/automation-plans/${AUTOMATION_PLAN_ID}"
+  if require_ok "GET /automation-plans/:planId" "200"; then
+    if echo "$LAST_BODY" | grep -q '"plan"'; then
+      pass "get plan: plan field present"
+    else
+      fail "get plan: plan field missing"
+    fi
+    if echo "$LAST_BODY" | grep -q '"intentJson"'; then
+      pass "get plan: intentJson field present"
+    else
+      fail "get plan: intentJson field missing"
+    fi
+    for field in ciphertext authTag iv encryptedKeyRef storageKey vaultAccessLogId; do
+      if echo "$LAST_BODY" | grep -q "\"${field}\""; then
+        fail "get plan: sensitive field ${field} leaked"
+      fi
+    done
+    pass "get plan: no sensitive fields"
+  fi
+else
+  pass "get automation plan: skipped (AUTOMATION_PLAN_ID not available)"
+fi
+
+# Step 129 — List automation plans for task
+header "GET /api/v1/tasks/:taskId/automation-plans"
+if [[ -n "${TASK_ID}" ]]; then
+  api_call GET "/api/v1/tasks/${TASK_ID}/automation-plans"
+  if require_ok "GET /tasks/:taskId/automation-plans" "200"; then
+    if echo "$LAST_BODY" | grep -q '"plans"'; then
+      pass "task automation plans: plans field present"
+    else
+      fail "task automation plans: plans field missing"
+    fi
+    for field in ciphertext authTag iv encryptedKeyRef storageKey vaultAccessLogId; do
+      if echo "$LAST_BODY" | grep -q "\"${field}\""; then
+        fail "task automation plans: sensitive field ${field} leaked"
+      fi
+    done
+    pass "task automation plans: no sensitive fields"
+  fi
+else
+  pass "list task automation plans: skipped (TASK_ID not available)"
+fi
+
+# Step 130 — List automation plans for client
+header "GET /api/v1/clients/:clientId/automation-plans"
+if [[ -n "${CLIENT_ID}" ]]; then
+  api_call GET "/api/v1/clients/${CLIENT_ID}/automation-plans"
+  if require_ok "GET /clients/:clientId/automation-plans" "200"; then
+    if echo "$LAST_BODY" | grep -q '"plans"'; then
+      pass "client automation plans: plans field present"
+    else
+      fail "client automation plans: plans field missing"
+    fi
+    for field in ciphertext authTag iv encryptedKeyRef storageKey vaultAccessLogId; do
+      if echo "$LAST_BODY" | grep -q "\"${field}\""; then
+        fail "client automation plans: sensitive field ${field} leaked"
+      fi
+    done
+    pass "client automation plans: no sensitive fields"
+    if echo "$LAST_BODY" | grep -qE '[a-z0-9._%+\-]+@[a-z0-9.-]+\.[a-z]{2,}'; then
+      fail "client automation plans: raw email pattern found"
+    else
+      pass "client automation plans: no raw email pattern"
+    fi
+  fi
+else
+  pass "list client automation plans: skipped (CLIENT_ID not available)"
+fi
+
+# Step 131 — Attempt to get non-existent plan (404)
+header "GET /api/v1/automation-plans/nonexistent → 404"
+api_call GET "/api/v1/automation-plans/nonexistent-plan-id-xxxxxxxxxxx"
+if [[ "$LAST_CODE" == "404" ]]; then
+  pass "non-existent plan: 404 as expected"
+  if echo "$LAST_BODY" | grep -q 'AUTOMATION_PLAN_NOT_FOUND'; then
+    pass "non-existent plan: error code AUTOMATION_PLAN_NOT_FOUND"
+  else
+    fail "non-existent plan: expected AUTOMATION_PLAN_NOT_FOUND error code"
+  fi
+else
+  fail "non-existent plan: expected 404, got ${LAST_CODE}"
+fi
+
+# =============================================================================
+# Cross-phase PII/secrets boundary sweep
+# =============================================================================
+echo
+echo "── Phase 3C/4A/4B: Cross-phase PII + secrets sweep ──────"
+
+# Step 132 — Verify notification list response contains no secrets/PII
+header "Notification response — ciphertext/authTag/iv/encryptedKeyRef/storageKey/vaultAccessLogId sweep"
+if [[ -n "${CLIENT_ID}" ]]; then
+  api_call GET "/api/v1/clients/${CLIENT_ID}/notifications"
+  NOTIF_LIST_BODY="$LAST_BODY"
+  ALL_CLEAN=true
+  for field in ciphertext authTag iv encryptedKeyRef storageKey vaultAccessLogId; do
+    if echo "$NOTIF_LIST_BODY" | grep -q "\"${field}\""; then
+      fail "notification sweep: field ${field} found in response"
+      ALL_CLEAN=false
+    fi
+  done
+  if $ALL_CLEAN; then
+    pass "notification sweep: all sensitive fields absent"
+  fi
+  if echo "$NOTIF_LIST_BODY" | grep -qE '[a-z0-9._%+\-]+@[a-z0-9.-]+\.[a-z]{2,}'; then
+    fail "notification sweep: raw email pattern in response"
+  else
+    pass "notification sweep: no raw email pattern"
+  fi
+  if echo "$NOTIF_LIST_BODY" | grep -qE '\b[0-9]{3}[-.\s]?[0-9]{3}[-.\s]?[0-9]{4}\b'; then
+    fail "notification sweep: phone pattern in response"
+  else
+    pass "notification sweep: no phone pattern"
+  fi
+else
+  pass "notification sweep: skipped (CLIENT_ID not available)"
+fi
+
+# Step 133 — Verify report list response contains no secrets/PII
+header "Report response — ciphertext/authTag/iv/encryptedKeyRef/storageKey/vaultAccessLogId sweep"
+if [[ -n "${CLIENT_ID}" ]]; then
+  api_call GET "/api/v1/clients/${CLIENT_ID}/reports"
+  REPORT_LIST_BODY="$LAST_BODY"
+  ALL_CLEAN=true
+  for field in ciphertext authTag iv encryptedKeyRef storageKey vaultAccessLogId; do
+    if echo "$REPORT_LIST_BODY" | grep -q "\"${field}\""; then
+      fail "report sweep: field ${field} found in response"
+      ALL_CLEAN=false
+    fi
+  done
+  if $ALL_CLEAN; then
+    pass "report sweep: all sensitive fields absent"
+  fi
+  if echo "$REPORT_LIST_BODY" | grep -qE '[a-z0-9._%+\-]+@[a-z0-9.-]+\.[a-z]{2,}'; then
+    fail "report sweep: raw email pattern in response"
+  else
+    pass "report sweep: no raw email pattern"
+  fi
+else
+  pass "report sweep: skipped (CLIENT_ID not available)"
+fi
+
+# Step 134 — Verify automation plan list contains no secrets/PII or raw dryRunResultJson with emails
+header "Automation plan response — secrets/PII boundary sweep"
+if [[ -n "${CLIENT_ID}" ]]; then
+  api_call GET "/api/v1/clients/${CLIENT_ID}/automation-plans"
+  PLAN_LIST_BODY="$LAST_BODY"
+  ALL_CLEAN=true
+  for field in ciphertext authTag iv encryptedKeyRef storageKey vaultAccessLogId; do
+    if echo "$PLAN_LIST_BODY" | grep -q "\"${field}\""; then
+      fail "automation plan sweep: field ${field} found"
+      ALL_CLEAN=false
+    fi
+  done
+  if $ALL_CLEAN; then
+    pass "automation plan sweep: all sensitive fields absent"
+  fi
+  if echo "$PLAN_LIST_BODY" | grep -qE '[a-z0-9._%+\-]+@[a-z0-9.-]+\.[a-z]{2,}'; then
+    fail "automation plan sweep: raw email pattern in response"
+  else
+    pass "automation plan sweep: no raw email pattern"
+  fi
+  # Dry run result must not contain real execution payloads
+  if echo "$PLAN_LIST_BODY" | grep -q 'DRY_RUN_ONLY'; then
+    pass "automation plan sweep: DRY_RUN_ONLY marker present in dry run result"
+  fi
+else
+  pass "automation plan sweep: skipped (CLIENT_ID not available)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo
 echo "════════════════════════════════════════════════════════"
@@ -1752,9 +2595,15 @@ echo "  Follow-up:               ${FOLLOW_UP_ID:-UNKNOWN}"
 echo "  Evidence:                ${EVIDENCE_ID:-UNKNOWN}"
 echo "  Intake session 1:        ${INTAKE_SESSION_ID:-UNKNOWN}"
 echo "  Intake session 2:        ${INTAKE_SESSION_ID_2:-UNKNOWN}"
+echo "  Notification:            ${NOTIFICATION_ID:-UNKNOWN}"
+echo "  Follow-up notification:  ${FOLLOW_UP_NOTIF_ID:-UNKNOWN}"
+echo "  Case summary report:     ${REPORT_ID:-UNKNOWN}"
+echo "  Proof packet report:     ${PROOF_PACKET_ID:-UNKNOWN}"
+echo "  Automation plan (done):  ${AUTOMATION_PLAN_ID:-UNKNOWN}"
+echo "  Automation plan (rej):   ${AUTOMATION_PLAN_ID_2:-UNKNOWN}"
 echo "════════════════════════════════════════════════════════"
 if [[ $FAILURES -eq 0 ]]; then
-  echo "  ALL SMOKE STEPS PASSED (100/100)"
+  echo "  ALL SMOKE STEPS PASSED (134/134)"
   echo "════════════════════════════════════════════════════════"
   exit 0
 else

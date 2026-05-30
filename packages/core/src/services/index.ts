@@ -91,3 +91,18 @@ export type {
   SafeIntakeSession,
   SafeClientPortalSummary,
 } from './client-intake.service.js';
+export { NotificationService } from './notification.service.js';
+export type {
+  ScheduleNotificationInput,
+  SafeNotification,
+} from './notification.service.js';
+export { CaseReportService } from './case-report.service.js';
+export type {
+  RequestReportInput,
+  SafeCaseReport,
+} from './case-report.service.js';
+export { AutomationPlanService } from './automation-plan.service.js';
+export type {
+  CreateAutomationPlanInput,
+  SafeAutomationPlan,
+} from './automation-plan.service.js';

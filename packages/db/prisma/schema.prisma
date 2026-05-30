@@ -315,6 +315,9 @@ model Client {
   removalRequestPackets    RemovalRequestPacket[]
   followUpReminders        FollowUpReminder[]
   intakeSessions           ClientIntakeSession[]
+  scheduledNotifications   ScheduledNotification[]
+  caseReports              CaseReport[]
+  automationPlans          AutomationPlan[]
 
   @@index([organizationId])
   @@index([status])
@@ -480,6 +483,8 @@ model CleanupCase {
   authorization ClientAuthorization  @relation(fields: [authorizationId], references: [id])
   tasks         CleanupTask[]
   timelineEvents CaseTimelineEvent[]
+  scheduledNotifications ScheduledNotification[]
+  caseReports   CaseReport[]
 
   @@index([clientId])
   @@map("cleanup_cases")
@@ -509,6 +514,8 @@ model CleanupTask {
   workflowRuns     TaskWorkflowRun[]
   removalRequestPackets RemovalRequestPacket[]
   followUpReminders     FollowUpReminder[]
+  scheduledNotifications ScheduledNotification[]
+  automationPlans        AutomationPlan[]
 
   @@index([caseId, status])
   @@index([status])
@@ -1168,6 +1175,7 @@ model FollowUpReminder {
 
   task   CleanupTask @relation(fields: [taskId], references: [id])
   client Client      @relation(fields: [clientId], references: [id])
+  scheduledNotifications ScheduledNotification[]
 
   @@index([taskId])
   @@index([clientId, dueAt])
@@ -1195,4 +1203,144 @@ model ClientIntakeSession {
   @@index([orgId])
   @@index([status])
   @@map("client_intake_sessions")
+}
+
+// =============================================================
+// NOTIFICATIONS (Phase 3C)
+// =============================================================
+
+enum NotificationChannel {
+  DRY_RUN
+}
+
+enum NotificationStatus {
+  PENDING
+  SCHEDULED
+  DELIVERED
+  FAILED
+  CANCELLED
+}
+
+model ScheduledNotification {
+  id                  String              @id @default(cuid())
+  clientId            String              @map("client_id")
+  caseId              String?             @map("case_id")
+  taskId              String?             @map("task_id")
+  followUpReminderId  String?             @map("follow_up_reminder_id")
+  channel             NotificationChannel @default(DRY_RUN)
+  status              NotificationStatus  @default(PENDING)
+  subjectSafe         String              @map("subject_safe")
+  bodySafe            String              @map("body_safe")
+  scheduledFor        DateTime            @map("scheduled_for")
+  deliveredAt         DateTime?           @map("delivered_at")
+  failedAt            DateTime?           @map("failed_at")
+  cancelledAt         DateTime?           @map("cancelled_at")
+  failureReason       String?             @map("failure_reason")
+  createdByUserId     String?             @map("created_by_user_id")
+  createdAt           DateTime            @default(now()) @map("created_at")
+  updatedAt           DateTime            @updatedAt @map("updated_at")
+
+  client    Client          @relation(fields: [clientId], references: [id])
+  case      CleanupCase?    @relation(fields: [caseId], references: [id])
+  task      CleanupTask?    @relation(fields: [taskId], references: [id])
+  followUp  FollowUpReminder? @relation(fields: [followUpReminderId], references: [id])
+
+  @@index([clientId, status])
+  @@index([status, scheduledFor])
+  @@index([followUpReminderId])
+  @@map("scheduled_notifications")
+}
+
+// =============================================================
+// REPORTS (Phase 4A)
+// =============================================================
+
+enum ReportType {
+  CASE_SUMMARY
+  EVIDENCE_SUMMARY
+  FULL_CASE_EXPORT
+  PROOF_PACKET
+}
+
+enum ExportFormat {
+  JSON
+  CSV
+  PDF_STUB
+}
+
+enum ReportStatus {
+  PENDING
+  GENERATING
+  READY
+  FAILED
+  EXPIRED
+}
+
+model CaseReport {
+  id                  String       @id @default(cuid())
+  clientId            String       @map("client_id")
+  caseId              String?      @map("case_id")
+  reportType          ReportType   @map("report_type")
+  exportFormat        ExportFormat @map("export_format")
+  status              ReportStatus @default(PENDING)
+  redactedSummary     String       @map("redacted_summary")
+  requestedByUserId   String?      @map("requested_by_user_id")
+  generatedAt         DateTime?    @map("generated_at")
+  failedAt            DateTime?    @map("failed_at")
+  expiresAt           DateTime?    @map("expires_at")
+  failureReason       String?      @map("failure_reason")
+  vaultAccessLogId    String?      @map("vault_access_log_id")
+  createdAt           DateTime     @default(now()) @map("created_at")
+  updatedAt           DateTime     @updatedAt @map("updated_at")
+
+  client Client      @relation(fields: [clientId], references: [id])
+  case   CleanupCase? @relation(fields: [caseId], references: [id])
+
+  @@index([clientId, status])
+  @@index([caseId, status])
+  @@index([status, expiresAt])
+  @@map("case_reports")
+}
+
+// =============================================================
+// AUTOMATION PLANS (Phase 4B)
+// =============================================================
+
+enum AutomationPlanStatus {
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  EXECUTING_DRY_RUN
+  DRY_RUN_COMPLETE
+  CANCELLED
+}
+
+model AutomationPlan {
+  id                      String               @id @default(cuid())
+  taskId                  String               @map("task_id")
+  clientId                String               @map("client_id")
+  status                  AutomationPlanStatus @default(PENDING_APPROVAL)
+  intentJson              Json                 @map("intent_json")
+  dryRunResultJson        Json?                @map("dry_run_result_json")
+  approvedByUserId        String?              @map("approved_by_user_id")
+  rejectedByUserId        String?              @map("rejected_by_user_id")
+  rejectionReason         String?              @map("rejection_reason")
+  cancelledByUserId       String?              @map("cancelled_by_user_id")
+  approvedAt              DateTime?            @map("approved_at")
+  rejectedAt              DateTime?            @map("rejected_at")
+  dryRunStartedAt         DateTime?            @map("dry_run_started_at")
+  dryRunCompletedAt       DateTime?            @map("dry_run_completed_at")
+  cancelledAt             DateTime?            @map("cancelled_at")
+  emergencyPauseBlockedAt DateTime?            @map("emergency_pause_blocked_at")
+  createdByUserId         String?              @map("created_by_user_id")
+  createdAt               DateTime             @default(now()) @map("created_at")
+  updatedAt               DateTime             @updatedAt @map("updated_at")
+
+  task   CleanupTask @relation(fields: [taskId], references: [id])
+  client Client      @relation(fields: [clientId], references: [id])
+
+  @@index([taskId, status])
+  @@index([clientId, createdAt])
+  @@index([status])
+  @@map("automation_plans")
 }

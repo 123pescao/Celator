@@ -222,9 +222,26 @@ async function cleanupTestData(): Promise<void> {
     await db.followUpReminder.deleteMany({ where: { taskId: { in: testTaskIds } } });
   }
 
+  // 10g. scheduled_notifications → cleanup_tasks (taskId FK), follow_up_reminders, cleanup_cases, clients
+  //      Must come before cleanup_tasks (10f) and follow_up_reminders (10e already gone).
+  if (testTaskIds.length > 0) {
+    await db.scheduledNotification.deleteMany({ where: { taskId: { in: testTaskIds } } });
+  }
+
+  // 10h. automation_plans → cleanup_tasks (taskId FK) — must come before cleanup_tasks (10f)
+  if (testTaskIds.length > 0) {
+    await db.automationPlan.deleteMany({ where: { taskId: { in: testTaskIds } } });
+  }
+
   // 10f (was 10c). cleanup_tasks — must come after all FK children above
   if (testCaseIds.length > 0) {
     await db.cleanupTask.deleteMany({ where: { caseId: { in: testCaseIds } } });
+  }
+
+  // 10i. case_reports → cleanup_cases (caseId FK), clients (clientId FK)
+  //      Must come before cleanup_cases (11) and clients (23).
+  if (testCaseIds.length > 0) {
+    await db.caseReport.deleteMany({ where: { caseId: { in: testCaseIds } } });
   }
 
   // 11. cleanup_cases → clients (clientId FK), client_authorizations (authorizationId FK)
@@ -287,6 +304,22 @@ async function cleanupTestData(): Promise<void> {
   //      clientId FK is SET NULL so client deletion order doesn't matter, but cleaner to go here.
   if (testOrgIds.length > 0) {
     await db.clientIntakeSession.deleteMany({ where: { orgId: { in: testOrgIds } } });
+  }
+
+  // 21c. scheduled_notifications → clients (clientId FK, RESTRICT). Clean up any remaining
+  //      (e.g., caseId/taskId-null notifications). 10g handled task-scoped ones; cover client-scoped remainder.
+  if (testClientIds.length > 0) {
+    await db.scheduledNotification.deleteMany({ where: { clientId: { in: testClientIds } } });
+  }
+
+  // 21d. case_reports → clients (clientId FK, RESTRICT). Covers any remaining.
+  if (testClientIds.length > 0) {
+    await db.caseReport.deleteMany({ where: { clientId: { in: testClientIds } } });
+  }
+
+  // 21e. automation_plans → clients (clientId FK, RESTRICT). Covers any remaining.
+  if (testClientIds.length > 0) {
+    await db.automationPlan.deleteMany({ where: { clientId: { in: testClientIds } } });
   }
 
   // 22. users → organizations (organizationId FK)
