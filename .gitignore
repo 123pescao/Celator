@@ -20,3 +20,22 @@ generated/
 *.pfx
 *.crt
 *.cer
+
+# Local npm / package manager config
+.npmrc
+
+# Claude / AI agent / local tool artifacts
+.claude/
+.mcp/
+*.session
+*.transcript
+claude-session*
+claude-transcript*
+conversation*
+scratchpad*
+prompt-dump*
+agent-output*
+
+# Editor/local machine config
+.vscode/settings.json
+.idea/
