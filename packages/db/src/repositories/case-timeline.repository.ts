@@ -20,4 +20,12 @@ export class CaseTimelineRepository {
       orderBy: { createdAt: 'asc' },
     });
   }
+
+  async listRecentForClient(clientId: string, limit: number): Promise<CaseTimelineEvent[]> {
+    return this.db.caseTimelineEvent.findMany({
+      where: { case: { is: { clientId } } },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+    });
+  }
 }

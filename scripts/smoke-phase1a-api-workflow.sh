@@ -1355,6 +1355,386 @@ else
   pass "evidence list: skipped"
 fi
 
+# ── Phase 2E — Operator Command Center ───────────────────────────────────────
+
+INTAKE_SESSION_ID=""
+INTAKE_SESSION_ID_2=""
+
+echo "── Phase 2E: Operator Command Center ──────────────────"
+
+# Step 70 — Dashboard overview (no filters — should return zero counts safely)
+api_call GET "/api/v1/operator/dashboard"
+if require_ok "GET /operator/dashboard (no filter)" "200"; then
+  if echo "$LAST_BODY" | grep -q '"overview"'; then
+    pass "dashboard overview: overview field present"
+  else
+    fail "dashboard overview: overview field missing"
+  fi
+  for field in ciphertext authTag encryptedKeyRef storageKey; do
+    if echo "$LAST_BODY" | grep -q "\"${field}\""; then
+      fail "dashboard overview: vault field ${field} leaked"
+    fi
+  done
+  pass "dashboard overview: no vault fields in response"
+fi
+
+# Step 71 — Dashboard overview with clientId filter
+if [[ -n "${CLIENT_ID}" ]]; then
+  api_call GET "/api/v1/operator/dashboard?clientId=${CLIENT_ID}"
+  if require_ok "GET /operator/dashboard?clientId" "200"; then
+    pass "dashboard overview with clientId: ok"
+  fi
+fi
+
+# Step 72 — Work queue with clientId filter
+if [[ -n "${CLIENT_ID}" ]]; then
+  api_call GET "/api/v1/operator/work-queue?clientId=${CLIENT_ID}"
+  if require_ok "GET /operator/work-queue?clientId" "200"; then
+    if echo "$LAST_BODY" | grep -q '"items"'; then
+      pass "work queue: items field present"
+    else
+      fail "work queue: items field missing"
+    fi
+  fi
+fi
+
+# Step 73 — Due follow-ups (clientId required)
+if [[ -n "${CLIENT_ID}" ]]; then
+  api_call GET "/api/v1/operator/follow-ups/due?clientId=${CLIENT_ID}"
+  if require_ok "GET /operator/follow-ups/due?clientId" "200"; then
+    if echo "$LAST_BODY" | grep -q '"followUps"'; then
+      pass "due follow-ups: followUps field present"
+    else
+      fail "due follow-ups: followUps field missing"
+    fi
+  fi
+fi
+
+# Step 74 — Due follow-ups without clientId should return 400
+api_call GET "/api/v1/operator/follow-ups/due"
+if [[ "$LAST_CODE" == "400" ]]; then
+  pass "due follow-ups without clientId: 400 as expected"
+else
+  fail "due follow-ups without clientId: expected 400, got ${LAST_CODE}"
+fi
+
+# Step 75 — Blocked workflows
+if [[ -n "${CLIENT_ID}" ]]; then
+  api_call GET "/api/v1/operator/workflows/blocked?clientId=${CLIENT_ID}"
+  if require_ok "GET /operator/workflows/blocked" "200"; then
+    pass "blocked workflows: ok"
+  fi
+fi
+
+# Step 76 — Ready packets
+if [[ -n "${CLIENT_ID}" ]]; then
+  api_call GET "/api/v1/operator/packets/ready?clientId=${CLIENT_ID}"
+  if require_ok "GET /operator/packets/ready" "200"; then
+    if echo "$LAST_BODY" | grep -q '"packets"'; then
+      pass "ready packets: packets field present"
+    else
+      fail "ready packets: packets field missing"
+    fi
+  fi
+fi
+
+# Step 77 — Client progress
+if [[ -n "${CLIENT_ID}" ]]; then
+  api_call GET "/api/v1/operator/clients/${CLIENT_ID}/progress"
+  if require_ok "GET /operator/clients/:clientId/progress" "200"; then
+    if echo "$LAST_BODY" | grep -q '"progress"'; then
+      pass "client progress: progress field present"
+    else
+      fail "client progress: progress field missing"
+    fi
+    for field in ciphertext authTag encryptedKeyRef storageKey; do
+      if echo "$LAST_BODY" | grep -q "\"${field}\""; then
+        fail "client progress: vault field ${field} leaked"
+      fi
+    done
+    pass "client progress: no vault fields"
+  fi
+fi
+
+# Step 78 — Case progress (correct client)
+if [[ -n "${CASE_ID}" && -n "${CLIENT_ID}" ]]; then
+  api_call GET "/api/v1/operator/cases/${CASE_ID}/progress?clientId=${CLIENT_ID}"
+  if require_ok "GET /operator/cases/:caseId/progress (correct client)" "200"; then
+    pass "case progress: ok with correct clientId"
+  fi
+fi
+
+# Step 79 — Case progress (wrong client — must return 403)
+if [[ -n "${CASE_ID}" ]]; then
+  api_call GET "/api/v1/operator/cases/${CASE_ID}/progress?clientId=wrong_client_id"
+  if [[ "$LAST_CODE" == "403" ]]; then
+    pass "case progress: 403 FORBIDDEN for wrong clientId"
+    if echo "$LAST_BODY" | grep -q '"FORBIDDEN"'; then
+      pass "case progress: FORBIDDEN error code present"
+    else
+      fail "case progress: FORBIDDEN error code missing"
+    fi
+  else
+    fail "case progress wrong client: expected 403, got ${LAST_CODE}"
+  fi
+fi
+
+# Step 80 — Task progress (correct client)
+if [[ -n "${LINKED_TASK_ID}" && -n "${CLIENT_ID}" ]]; then
+  api_call GET "/api/v1/operator/tasks/${LINKED_TASK_ID}/progress?clientId=${CLIENT_ID}"
+  if require_ok "GET /operator/tasks/:taskId/progress (correct client)" "200"; then
+    pass "task progress: ok with correct clientId"
+  fi
+fi
+
+# Step 81 — Task progress (wrong client — must return 403)
+if [[ -n "${LINKED_TASK_ID}" ]]; then
+  api_call GET "/api/v1/operator/tasks/${LINKED_TASK_ID}/progress?clientId=wrong_client_id"
+  if [[ "$LAST_CODE" == "403" ]]; then
+    pass "task progress: 403 FORBIDDEN for wrong clientId"
+  else
+    fail "task progress wrong client: expected 403, got ${LAST_CODE}"
+  fi
+fi
+
+# Step 82 — Recent activity with caseId scope
+if [[ -n "${CASE_ID}" ]]; then
+  api_call GET "/api/v1/operator/activity?caseId=${CASE_ID}&limit=5"
+  if require_ok "GET /operator/activity?caseId" "200"; then
+    if echo "$LAST_BODY" | grep -q '"events"'; then
+      pass "recent activity: events field present"
+    else
+      fail "recent activity: events field missing"
+    fi
+  fi
+fi
+
+# ── Phase 3B — Client Intake ──────────────────────────────────────────────────
+
+echo "── Phase 3B: Client Intake ─────────────────────────────"
+
+# Step 83 — Create intake session (minimal)
+if [[ -n "${ORG_ID}" ]]; then
+  api_call POST "/api/v1/intake/sessions" \
+    "{\"orgId\":\"${ORG_ID}\"}"
+  if require_ok "POST /intake/sessions" "201"; then
+    if echo "$LAST_BODY" | grep -q '"session"'; then
+      pass "create intake session: session field present"
+      INTAKE_SESSION_ID=$(echo "$LAST_BODY" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+      pass "create intake session: ID extracted ${INTAKE_SESSION_ID}"
+    else
+      fail "create intake session: session field missing"
+    fi
+    if echo "$LAST_BODY" | grep -q '"STARTED"'; then
+      pass "create intake session: status STARTED"
+    else
+      fail "create intake session: status not STARTED"
+    fi
+    for field in ciphertext authTag encryptedKeyRef storageKey; do
+      if echo "$LAST_BODY" | grep -q "\"${field}\""; then
+        fail "create intake session: vault field ${field} leaked"
+      fi
+    done
+    pass "create intake session: no vault fields"
+  fi
+fi
+
+# Step 84 — PII rejection: safeContactRef with raw email
+if [[ -n "${ORG_ID}" ]]; then
+  api_call POST "/api/v1/intake/sessions" \
+    "{\"orgId\":\"${ORG_ID}\",\"safeContactRef\":\"contact admin@example.com\"}"
+  if [[ "$LAST_CODE" == "400" ]]; then
+    pass "intake session PII rejection: 400 for raw email in safeContactRef"
+  else
+    fail "intake session PII rejection: expected 400, got ${LAST_CODE}"
+  fi
+fi
+
+# Step 85 — Link client to session
+if [[ -n "${INTAKE_SESSION_ID}" && -n "${CLIENT_ID}" ]]; then
+  api_call POST "/api/v1/intake/sessions/${INTAKE_SESSION_ID}/link-client" \
+    "{\"clientId\":\"${CLIENT_ID}\"}"
+  if require_ok "POST /intake/sessions/:id/link-client" "200"; then
+    pass "link client to intake session: ok"
+  fi
+fi
+
+# Step 86 — Mark consent pending
+if [[ -n "${INTAKE_SESSION_ID}" ]]; then
+  api_call POST "/api/v1/intake/sessions/${INTAKE_SESSION_ID}/mark-consent-pending" "{}"
+  if require_ok "POST /intake/sessions/:id/mark-consent-pending" "200"; then
+    if echo "$LAST_BODY" | grep -q '"CONSENT_PENDING"'; then
+      pass "mark consent pending: status CONSENT_PENDING"
+    else
+      fail "mark consent pending: status not CONSENT_PENDING"
+    fi
+  fi
+fi
+
+# Step 87 — Mark identity pending
+if [[ -n "${INTAKE_SESSION_ID}" ]]; then
+  api_call POST "/api/v1/intake/sessions/${INTAKE_SESSION_ID}/mark-identity-pending" "{}"
+  if require_ok "POST /intake/sessions/:id/mark-identity-pending" "200"; then
+    pass "mark identity pending: ok"
+  fi
+fi
+
+# Step 88 — Mark ready for review
+if [[ -n "${INTAKE_SESSION_ID}" ]]; then
+  api_call POST "/api/v1/intake/sessions/${INTAKE_SESSION_ID}/mark-ready-for-review" "{}"
+  if require_ok "POST /intake/sessions/:id/mark-ready-for-review" "200"; then
+    pass "mark ready for review: ok"
+  fi
+fi
+
+# Step 89 — Complete session
+if [[ -n "${INTAKE_SESSION_ID}" ]]; then
+  api_call POST "/api/v1/intake/sessions/${INTAKE_SESSION_ID}/complete" "{}"
+  if require_ok "POST /intake/sessions/:id/complete" "200"; then
+    if echo "$LAST_BODY" | grep -q '"COMPLETED"'; then
+      pass "complete intake session: status COMPLETED"
+    else
+      fail "complete intake session: status not COMPLETED"
+    fi
+  fi
+fi
+
+# Step 90 — Terminal rejection: complete again after COMPLETED
+if [[ -n "${INTAKE_SESSION_ID}" ]]; then
+  api_call POST "/api/v1/intake/sessions/${INTAKE_SESSION_ID}/complete" "{}"
+  if [[ "$LAST_CODE" == "409" ]]; then
+    pass "complete COMPLETED session: 409 as expected"
+  else
+    fail "complete COMPLETED session: expected 409, got ${LAST_CODE}"
+  fi
+fi
+
+# Step 91 — Terminal rejection: cancel after COMPLETED
+if [[ -n "${INTAKE_SESSION_ID}" ]]; then
+  api_call POST "/api/v1/intake/sessions/${INTAKE_SESSION_ID}/cancel" "{}"
+  if [[ "$LAST_CODE" == "409" ]]; then
+    pass "cancel COMPLETED session: 409 as expected"
+  else
+    fail "cancel COMPLETED session: expected 409, got ${LAST_CODE}"
+  fi
+fi
+
+# Step 92 — Create second session for cancel test
+if [[ -n "${ORG_ID}" ]]; then
+  api_call POST "/api/v1/intake/sessions" \
+    "{\"orgId\":\"${ORG_ID}\"}"
+  if require_ok "POST /intake/sessions (second)" "201"; then
+    INTAKE_SESSION_ID_2=$(echo "$LAST_BODY" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+    pass "create second intake session: ID extracted ${INTAKE_SESSION_ID_2}"
+  fi
+fi
+
+# Step 93 — Cancel second session
+if [[ -n "${INTAKE_SESSION_ID_2}" ]]; then
+  api_call POST "/api/v1/intake/sessions/${INTAKE_SESSION_ID_2}/cancel" "{}"
+  if require_ok "POST /intake/sessions/:id/cancel" "200"; then
+    if echo "$LAST_BODY" | grep -q '"CANCELLED"'; then
+      pass "cancel intake session: status CANCELLED"
+    else
+      fail "cancel intake session: status not CANCELLED"
+    fi
+  fi
+fi
+
+# Step 94 — Transition after CANCELLED should fail
+if [[ -n "${INTAKE_SESSION_ID_2}" ]]; then
+  api_call POST "/api/v1/intake/sessions/${INTAKE_SESSION_ID_2}/mark-consent-pending" "{}"
+  if [[ "$LAST_CODE" == "409" ]]; then
+    pass "transition after CANCELLED: 409 as expected"
+  else
+    fail "transition after CANCELLED: expected 409, got ${LAST_CODE}"
+  fi
+fi
+
+# Step 95 — Get session by ID
+if [[ -n "${INTAKE_SESSION_ID}" ]]; then
+  api_call GET "/api/v1/intake/sessions/${INTAKE_SESSION_ID}"
+  if require_ok "GET /intake/sessions/:id" "200"; then
+    pass "get intake session: ok"
+    for field in ciphertext authTag encryptedKeyRef storageKey; do
+      if echo "$LAST_BODY" | grep -q "\"${field}\""; then
+        fail "get intake session: vault field ${field} leaked"
+      fi
+    done
+    pass "get intake session: no vault fields"
+  fi
+fi
+
+# Step 96 — Non-existent session should return 404
+api_call GET "/api/v1/intake/sessions/nonexistent-session-id-xyz"
+if [[ "$LAST_CODE" == "404" ]]; then
+  pass "get missing session: 404 as expected"
+else
+  fail "get missing session: expected 404, got ${LAST_CODE}"
+fi
+
+# Step 97 — List sessions for org
+if [[ -n "${ORG_ID}" ]]; then
+  api_call GET "/api/v1/organizations/${ORG_ID}/intake-sessions"
+  if require_ok "GET /organizations/:orgId/intake-sessions" "200"; then
+    if echo "$LAST_BODY" | grep -q '"sessions"'; then
+      pass "list intake sessions for org: sessions field present"
+    else
+      fail "list intake sessions for org: sessions field missing"
+    fi
+  fi
+fi
+
+# Step 98 — Client portal summary
+if [[ -n "${CLIENT_ID}" ]]; then
+  api_call GET "/api/v1/clients/${CLIENT_ID}/portal-summary"
+  if require_ok "GET /clients/:clientId/portal-summary" "200"; then
+    if echo "$LAST_BODY" | grep -q '"summary"'; then
+      pass "portal summary: summary field present"
+    else
+      fail "portal summary: summary field missing"
+    fi
+    for field in ciphertext authTag encryptedKeyRef storageKey; do
+      if echo "$LAST_BODY" | grep -q "\"${field}\""; then
+        fail "portal summary: vault field ${field} leaked"
+      fi
+    done
+    pass "portal summary: no vault fields"
+    # PII boundary check
+    if echo "$LAST_BODY" | grep -qE '[a-z0-9._%+\-]+@[a-z0-9.-]+\.[a-z]{2,}'; then
+      fail "portal summary: raw email pattern found"
+    else
+      pass "portal summary: no raw email pattern"
+    fi
+  fi
+fi
+
+# Step 99 — Scope update on intake session
+if [[ -n "${INTAKE_SESSION_ID_2}" ]]; then
+  # Session is CANCELLED — should return 409
+  api_call PATCH "/api/v1/intake/sessions/${INTAKE_SESSION_ID_2}/scope" \
+    '{"requestedActionTypes":["OPT_OUT"]}'
+  if [[ "$LAST_CODE" == "409" ]]; then
+    pass "scope update on CANCELLED session: 409 as expected"
+  else
+    fail "scope update on CANCELLED session: expected 409, got ${LAST_CODE}"
+  fi
+fi
+
+# Step 100 — Recent activity with clientId scope
+if [[ -n "${CLIENT_ID}" ]]; then
+  api_call GET "/api/v1/operator/activity?clientId=${CLIENT_ID}&limit=10"
+  if require_ok "GET /operator/activity?clientId" "200"; then
+    pass "recent activity by clientId: ok"
+    for field in ciphertext authTag encryptedKeyRef actorId; do
+      if echo "$LAST_BODY" | grep -q "\"${field}\""; then
+        fail "recent activity: field ${field} leaked"
+      fi
+    done
+    pass "recent activity: no sensitive fields leaked"
+  fi
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo
 echo "════════════════════════════════════════════════════════"
@@ -1370,9 +1750,11 @@ echo "  Workflow run:            ${WORKFLOW_RUN_ID:-UNKNOWN}"
 echo "  Packet:                  ${PACKET_ID:-UNKNOWN}"
 echo "  Follow-up:               ${FOLLOW_UP_ID:-UNKNOWN}"
 echo "  Evidence:                ${EVIDENCE_ID:-UNKNOWN}"
+echo "  Intake session 1:        ${INTAKE_SESSION_ID:-UNKNOWN}"
+echo "  Intake session 2:        ${INTAKE_SESSION_ID_2:-UNKNOWN}"
 echo "════════════════════════════════════════════════════════"
 if [[ $FAILURES -eq 0 ]]; then
-  echo "  ALL SMOKE STEPS PASSED (69/69)"
+  echo "  ALL SMOKE STEPS PASSED (100/100)"
   echo "════════════════════════════════════════════════════════"
   exit 0
 else

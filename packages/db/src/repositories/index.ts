@@ -26,3 +26,5 @@ export { RemovalRequestPacketRepository } from './removal-request-packet.reposit
 export type { PacketWithItems, PacketStatus } from './removal-request-packet.repository.js';
 export { FollowUpReminderRepository } from './follow-up-reminder.repository.js';
 export type { FollowUpStatus } from './follow-up-reminder.repository.js';
+export { ClientIntakeSessionRepository } from './client-intake-session.repository.js';
+export type { ClientIntakeStatus } from './client-intake-session.repository.js';

@@ -34,6 +34,8 @@ import {
   RemovalRequestPacketRepository,
   FollowUpReminderRepository,
   EvidenceRecordRepository,
+  EmergencyPauseRepository,
+  ClientIntakeSessionRepository,
 } from '@celator/db';
 import { LocalKmsProvider } from '@celator/security';
 import {
@@ -54,6 +56,8 @@ import {
   RemovalRequestPacketService,
   EvidenceService,
   FollowUpReminderService,
+  OperatorCommandCenterService,
+  ClientIntakeService,
 } from '../../index.js';
 
 // ---------------------------------------------------------------------------
@@ -279,6 +283,12 @@ async function cleanupTestData(): Promise<void> {
     await db.emergencyPauseEvent.deleteMany({ where: { triggeredBy: { in: testUserIds } } });
   }
 
+  // 21b. client_intake_sessions — orgId FK is RESTRICT; must be deleted before organizations.
+  //      clientId FK is SET NULL so client deletion order doesn't matter, but cleaner to go here.
+  if (testOrgIds.length > 0) {
+    await db.clientIntakeSession.deleteMany({ where: { orgId: { in: testOrgIds } } });
+  }
+
   // 22. users → organizations (organizationId FK)
   if (testOrgIds.length > 0) {
     await db.user.deleteMany({ where: { organizationId: { in: testOrgIds } } });
@@ -327,6 +337,8 @@ function buildTestServices() {
   const packetRepo = new RemovalRequestPacketRepository(db);
   const followUpRepo = new FollowUpReminderRepository(db);
   const evidenceRepo = new EvidenceRecordRepository(db);
+  const emergencyPauseRepo = new EmergencyPauseRepository(db);
+  const intakeSessionRepo = new ClientIntakeSessionRepository(db);
 
   const audit = new AuditService(auditRepo);
   const timeline = new CaseTimelineService(timelineRepo);
@@ -351,6 +363,14 @@ function buildTestServices() {
   const packetService = new RemovalRequestPacketService(packetRepo, taskRepo, dataSourceTargetRepo, vaultService, audit, timeline);
   const evidenceService = new EvidenceService(evidenceRepo, taskRepo, audit);
   const followUpService = new FollowUpReminderService(followUpRepo, taskRepo, audit, timeline);
+  const operatorCommandCenterService = new OperatorCommandCenterService(
+    clientRepo, caseRepo, taskRepo, workflowRunRepo, packetRepo,
+    followUpRepo, evidenceRepo, manualSubmissionRepo, timelineRepo,
+  );
+  const intakeService = new ClientIntakeService(
+    intakeSessionRepo, caseRepo, taskRepo, workflowRunRepo, packetRepo,
+    followUpRepo, emergencyPauseRepo, audit,
+  );
 
   return {
     orgRepo, userRepo,
@@ -359,6 +379,8 @@ function buildTestServices() {
     vaultService, dataSourceTargetService, removalDraftService, manualSubmissionService,
     workflowEngineService, playbookRepo, workflowRunRepo,
     packetService, evidenceService, followUpService,
+    operatorCommandCenterService, intakeService,
+    caseRepo, taskRepo, clientRepo,
   };
 }
 
@@ -2300,5 +2322,209 @@ describe('Phase 2B/2C packet, evidence, and follow-up (integration)', () => {
     const dueIds = due.map((f) => f.id);
     expect(dueIds).toContain(past.ok ? past.value.id : '');
     expect(dueIds).not.toContain(future.ok ? future.value.id : '');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 2E + 3A + 3B integration tests
+// ---------------------------------------------------------------------------
+
+describe('Phase 2E/3A/3B integration', () => {
+  const {
+    orgRepo, userRepo, clientService, civService, consentService,
+    caseService, taskService, packetService, followUpService,
+    operatorCommandCenterService, intakeService,
+    caseRepo, taskRepo, clientRepo,
+  } = buildTestServices();
+
+  let orgId = '';
+  let clientId = '';
+  let caseId = '';
+  let taskId = '';
+
+  beforeAll(async () => {
+    await cleanupTestData();
+    const s = suffix();
+    const org = await orgRepo.create({ name: `it_2e3b_org_${s}` });
+    orgId = org.id;
+    const user = await userRepo.create({ organization: { connect: { id: orgId } }, email: `it_2e3b_${s}@integration.invalid`, displayName: 'Test Actor 2E' });
+    TEST_ACTOR_ID = user.id;
+
+    const clientResult = await clientService.create({ organizationId: orgId, displayName: `it_2e3b_client_${s}` }, TEST_ACTOR_ID);
+    expect(clientResult.ok).toBe(true);
+    if (!clientResult.ok) return;
+    clientId = clientResult.value.id;
+
+    const civCreate = await civService.createRecord(clientId, TEST_ACTOR_ID);
+    expect(civCreate.ok).toBe(true);
+    if (!civCreate.ok) return;
+    await civService.recordOperatorAttestation(civCreate.value.id, 'Verified for 2E/3B integration test', TEST_ACTOR_ID);
+    await civService.completeVerification(civCreate.value.id, TEST_ACTOR_ID);
+
+    const cvResult = await consentService.createConsentVersion(`999.2e3b.${s}`, 'a'.repeat(64), new Date('2026-01-01'), undefined, TEST_ACTOR_ID);
+    expect(cvResult.ok).toBe(true);
+    if (!cvResult.ok) return;
+
+    const authResult = await consentService.createAuthorization({
+      clientId, authorizationType: 'SELF', scopeNames: ['DATA_BROKER_OPT_OUT'],
+      jurisdiction: 'US', consentVersionId: cvResult.value.id, signedAt: new Date(),
+    }, TEST_ACTOR_ID);
+    expect(authResult.ok).toBe(true);
+    if (!authResult.ok) return;
+
+    const caseResult = await caseService.create({ clientId, authorizationId: authResult.value.id, title: `it_2e3b_case_${s}` }, TEST_ACTOR_ID);
+    expect(caseResult.ok).toBe(true);
+    if (!caseResult.ok) return;
+    caseId = caseResult.value.id;
+
+    const taskResult = await taskService.create({ caseId, actionType: 'OPT_OUT' }, clientId, TEST_ACTOR_ID);
+    expect(taskResult.ok).toBe(true);
+    if (!taskResult.ok) return;
+    taskId = taskResult.value.id;
+
+    // Update task to OPERATOR_APPROVED so it shows up in the work queue
+    await taskRepo.updateStatus(taskId, 'OPERATOR_APPROVED');
+  });
+
+  afterAll(async () => {
+    await cleanupTestData();
+  });
+
+  it('getDashboardOverview returns non-negative counts for a real client', async () => {
+    await packetService.generateForTask({ taskId, clientId }, TEST_ACTOR_ID);
+    await followUpService.create({ taskId, clientId, dueAt: new Date(Date.now() - 1000) }, TEST_ACTOR_ID);
+
+    const overview = await operatorCommandCenterService.getDashboardOverview({ clientId });
+    expect(overview.totalClients).toBe(1);
+    expect(overview.activeCases).toBeGreaterThanOrEqual(1);
+    expect(overview.openTasks).toBeGreaterThanOrEqual(1);
+    expect(overview.followUpsDue).toBeGreaterThanOrEqual(1);
+
+    const json = JSON.stringify(overview);
+    expect(json).not.toContain('ciphertext');
+    expect(json).not.toContain('storageKey');
+  });
+
+  it('getClientProgress returns correct case and task counts', async () => {
+    const result = await operatorCommandCenterService.getClientProgress(clientId);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.clientId).toBe(clientId);
+    expect(result.value.totalCases).toBeGreaterThanOrEqual(1);
+    expect(result.value.totalTasks).toBeGreaterThanOrEqual(1);
+  });
+
+  it('getCaseProgress returns FORBIDDEN when clientId does not match case.clientId', async () => {
+    const result = await operatorCommandCenterService.getCaseProgress(caseId, 'wrong_client');
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe('FORBIDDEN');
+      expect(result).not.toHaveProperty('value');
+    }
+  });
+
+  it('getCaseProgress returns correct task counts for the right client', async () => {
+    const result = await operatorCommandCenterService.getCaseProgress(caseId, clientId);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.totalTasks).toBeGreaterThanOrEqual(1);
+  });
+
+  it('getTaskProgress returns FORBIDDEN when case clientId mismatches request', async () => {
+    const result = await operatorCommandCenterService.getTaskProgress(taskId, 'wrong_client');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toBe('FORBIDDEN');
+  });
+
+  it('listDueFollowUps returns due follow-ups for a client', async () => {
+    const result = await operatorCommandCenterService.listDueFollowUps({ clientId, asOf: new Date() });
+    expect(Array.isArray(result)).toBe(true);
+    const json = JSON.stringify(result);
+    expect(json).not.toContain('ciphertext');
+  });
+
+  it('ClientIntakeService.createSession persists STARTED session', async () => {
+    const result = await intakeService.createSession({ orgId }, TEST_ACTOR_ID);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const row = await db.clientIntakeSession.findUnique({ where: { id: result.value.id } });
+    expect(row?.status).toBe('STARTED');
+    expect(result.value.status).toBe('STARTED');
+    const json = JSON.stringify(result.value);
+    expect(json).not.toContain('ciphertext');
+  });
+
+  it('ClientIntakeService full happy path: STARTED → CONSENT_PENDING → IDENTITY_PENDING → READY_FOR_REVIEW → COMPLETED', async () => {
+    const createResult = await intakeService.createSession({ orgId }, TEST_ACTOR_ID);
+    expect(createResult.ok).toBe(true);
+    if (!createResult.ok) return;
+    const sessionId = createResult.value.id;
+
+    const linkResult = await intakeService.linkClient(sessionId, clientId, TEST_ACTOR_ID);
+    expect(linkResult.ok).toBe(true);
+
+    const consentResult = await intakeService.markConsentPending(sessionId, TEST_ACTOR_ID);
+    expect(consentResult.ok).toBe(true);
+    if (consentResult.ok) expect(consentResult.value.status).toBe('CONSENT_PENDING');
+
+    const identityResult = await intakeService.markIdentityPending(sessionId, TEST_ACTOR_ID);
+    expect(identityResult.ok).toBe(true);
+
+    const readyResult = await intakeService.markReadyForReview(sessionId, TEST_ACTOR_ID);
+    expect(readyResult.ok).toBe(true);
+
+    const completeResult = await intakeService.completeSession(sessionId, TEST_ACTOR_ID);
+    expect(completeResult.ok).toBe(true);
+    if (!completeResult.ok) return;
+    expect(completeResult.value.status).toBe('COMPLETED');
+
+    const row = await db.clientIntakeSession.findUnique({ where: { id: sessionId } });
+    expect(row?.status).toBe('COMPLETED');
+    expect(row?.completedAt).toBeTruthy();
+  });
+
+  it('ClientIntakeService.cancelSession: STARTED → CANCELLED, further transitions blocked', async () => {
+    const createResult = await intakeService.createSession({ orgId }, TEST_ACTOR_ID);
+    expect(createResult.ok).toBe(true);
+    if (!createResult.ok) return;
+    const sessionId = createResult.value.id;
+
+    const cancelResult = await intakeService.cancelSession(sessionId, TEST_ACTOR_ID);
+    expect(cancelResult.ok).toBe(true);
+    if (cancelResult.ok) expect(cancelResult.value.status).toBe('CANCELLED');
+
+    const afterCancel = await intakeService.markConsentPending(sessionId, TEST_ACTOR_ID);
+    expect(afterCancel.ok).toBe(false);
+    if (!afterCancel.ok) expect(afterCancel.error).toBe('INTAKE_INVALID_STATUS');
+  });
+
+  it('ClientIntakeService safeContactRef PII rejection: no session created for raw email', async () => {
+    const result = await intakeService.createSession({ orgId, safeContactRef: 'contact user@example.com' }, TEST_ACTOR_ID);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toBe('VALIDATION_ERROR');
+  });
+
+  it('getClientPortalSummary returns safe summary with no vault fields', async () => {
+    const result = await intakeService.getClientPortalSummary(clientId);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.clientId).toBe(clientId);
+    const json = JSON.stringify(result.value);
+    expect(json).not.toContain('ciphertext');
+    expect(json).not.toContain('storageKey');
+    expect(json).not.toContain('authTag');
+  });
+
+  it('audit logs contain intake session events and no raw PII', async () => {
+    await intakeService.createSession({ orgId }, TEST_ACTOR_ID);
+
+    const logs = await db.auditLog.findMany({ where: { actorId: TEST_ACTOR_ID, eventType: { startsWith: 'INTAKE_' } } });
+    expect(logs.length).toBeGreaterThan(0);
+
+    for (const log of logs) {
+      const meta = JSON.stringify(log.metadata ?? {});
+      expect(meta).not.toMatch(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
+      expect(meta).not.toContain('ciphertext');
+    }
   });
 });

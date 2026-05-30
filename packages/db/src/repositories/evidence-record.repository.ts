@@ -32,4 +32,11 @@ export class EvidenceRecordRepository {
   async markImmutable(id: string): Promise<EvidenceRecord> {
     return this.db.evidenceRecord.update({ where: { id }, data: { isImmutable: true } });
   }
+
+  async listForClient(clientId: string): Promise<EvidenceRecord[]> {
+    return this.db.evidenceRecord.findMany({
+      where: { clientId },
+      orderBy: { createdAt: 'asc' },
+    });
+  }
 }

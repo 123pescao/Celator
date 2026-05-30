@@ -76,3 +76,18 @@ export type {
   CreateFollowUpInput,
   SafeFollowUp,
 } from './follow-up-reminder.service.js';
+export { OperatorCommandCenterService } from './operator-command-center.service.js';
+export type {
+  DashboardOverview,
+  WorkQueueItem,
+  ClientProgress,
+  CaseProgress,
+  TaskProgress,
+  SafeTimelineEntry,
+} from './operator-command-center.service.js';
+export { ClientIntakeService } from './client-intake.service.js';
+export type {
+  CreateIntakeSessionInput,
+  SafeIntakeSession,
+  SafeClientPortalSummary,
+} from './client-intake.service.js';

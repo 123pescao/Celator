@@ -27,6 +27,8 @@ import {
   TaskWorkflowRunRepository,
   RemovalRequestPacketRepository,
   FollowUpReminderRepository,
+  EmergencyPauseRepository,
+  ClientIntakeSessionRepository,
 } from '@celator/db';
 import {
   AuditService,
@@ -46,6 +48,8 @@ import {
   RemovalRequestPacketService,
   EvidenceService,
   FollowUpReminderService,
+  OperatorCommandCenterService,
+  ClientIntakeService,
 } from '@celator/core';
 import { getKmsProvider } from '@celator/security';
 
@@ -76,6 +80,8 @@ export function buildServices() {
   const workflowRunRepo = new TaskWorkflowRunRepository(db);
   const packetRepo = new RemovalRequestPacketRepository(db);
   const followUpRepo = new FollowUpReminderRepository(db);
+  const emergencyPauseRepo = new EmergencyPauseRepository(db);
+  const intakeSessionRepo = new ClientIntakeSessionRepository(db);
 
   // Services
   const audit = new AuditService(auditRepo);
@@ -123,10 +129,18 @@ export function buildServices() {
   const packetService = new RemovalRequestPacketService(packetRepo, taskRepo, dataSourceTargetRepo, vaultService, audit, timeline);
   const evidenceService = new EvidenceService(evidenceRepo, taskRepo, audit);
   const followUpService = new FollowUpReminderService(followUpRepo, taskRepo, audit, timeline);
+  const operatorCommandCenterService = new OperatorCommandCenterService(
+    clientRepo, caseRepo, taskRepo, workflowRunRepo, packetRepo,
+    followUpRepo, evidenceRepo, manualSubmissionRepo, timelineRepo,
+  );
+  const intakeService = new ClientIntakeService(
+    intakeSessionRepo, caseRepo, taskRepo, workflowRunRepo, packetRepo,
+    followUpRepo, emergencyPauseRepo, audit,
+  );
 
   return {
-    repos: { orgRepo, userRepo, clientRepo, civRepo, consentVersionRepo, authorizationRepo, caseRepo, taskRepo, snapshotRepo, requestRepo, approvalRepo, auditRepo, timelineRepo, evidenceRepo, vaultRecordRepo, vaultAccessLogRepo, dataSourceTargetRepo, manualSubmissionRepo, playbookRepo, workflowRunRepo, packetRepo, followUpRepo },
-    services: { audit, timeline, clientService, civService, consentService, caseService, taskService, reviewPacketService, operatorApprovalService, vaultService, dataSourceTargetService, removalDraftService, manualSubmissionService, workflowEngineService, packetService, evidenceService, followUpService },
+    repos: { orgRepo, userRepo, clientRepo, civRepo, consentVersionRepo, authorizationRepo, caseRepo, taskRepo, snapshotRepo, requestRepo, approvalRepo, auditRepo, timelineRepo, evidenceRepo, vaultRecordRepo, vaultAccessLogRepo, dataSourceTargetRepo, manualSubmissionRepo, playbookRepo, workflowRunRepo, packetRepo, followUpRepo, emergencyPauseRepo, intakeSessionRepo },
+    services: { audit, timeline, clientService, civService, consentService, caseService, taskService, reviewPacketService, operatorApprovalService, vaultService, dataSourceTargetService, removalDraftService, manualSubmissionService, workflowEngineService, packetService, evidenceService, followUpService, operatorCommandCenterService, intakeService },
   };
 }
 

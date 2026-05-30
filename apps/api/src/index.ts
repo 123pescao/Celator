@@ -30,6 +30,8 @@ import { workflowRoutes } from './routes/v1/workflow.js';
 import { removalRequestPacketRoutes } from './routes/v1/removal-request-packets.js';
 import { evidenceRoutes } from './routes/v1/evidence.js';
 import { followUpRoutes } from './routes/v1/follow-up-reminders.js';
+import { operatorCommandCenterRoutes } from './routes/v1/operator-command-center.js';
+import { intakeRoutes } from './routes/v1/intake.js';
 import { buildServices } from './services-factory.js';
 
 const logger = createLogger({ name: 'celator-api' });
@@ -91,6 +93,8 @@ async function start(): Promise<void> {
   await fastify.register(removalRequestPacketRoutes, { prefix: '/api/v1', services, userRepo: repos.userRepo });
   await fastify.register(evidenceRoutes, { prefix: '/api/v1', services, userRepo: repos.userRepo });
   await fastify.register(followUpRoutes, { prefix: '/api/v1', services, userRepo: repos.userRepo });
+  await fastify.register(operatorCommandCenterRoutes, { prefix: '/api/v1', services, userRepo: repos.userRepo });
+  await fastify.register(intakeRoutes, { prefix: '/api/v1', services, userRepo: repos.userRepo });
 
   // Global error handler — never expose stack traces in responses
   fastify.setErrorHandler((error, request, reply) => {

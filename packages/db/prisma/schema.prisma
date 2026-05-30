@@ -202,8 +202,9 @@ model Organization {
   updatedAt   DateTime @updatedAt
   isActive    Boolean  @default(true)
 
-  users       User[]
-  clients     Client[]
+  users          User[]
+  clients        Client[]
+  intakeSessions ClientIntakeSession[]
 
   @@map("organizations")
 }
@@ -313,6 +314,7 @@ model Client {
   evidenceRecords          EvidenceRecord[]
   removalRequestPackets    RemovalRequestPacket[]
   followUpReminders        FollowUpReminder[]
+  intakeSessions           ClientIntakeSession[]
 
   @@index([organizationId])
   @@index([status])
@@ -1136,6 +1138,21 @@ enum FollowUpStatus {
   CANCELLED
 }
 
+// =============================================================
+// CLIENT INTAKE (Phase 3B)
+// =============================================================
+
+enum ClientIntakeStatus {
+  STARTED
+  CONTACT_CAPTURED
+  CONSENT_PENDING
+  IDENTITY_PENDING
+  READY_FOR_REVIEW
+  COMPLETED
+  CANCELLED
+  EXPIRED
+}
+
 model FollowUpReminder {
   id                String         @id @default(cuid())
   taskId            String         @map("task_id")
@@ -1156,4 +1173,26 @@ model FollowUpReminder {
   @@index([clientId, dueAt])
   @@index([status, dueAt])
   @@map("follow_up_reminders")
+}
+
+model ClientIntakeSession {
+  id                   String              @id @default(cuid())
+  clientId             String?             @map("client_id")
+  orgId                String              @map("org_id")
+  status               ClientIntakeStatus  @default(STARTED)
+  safeContactRef       String?             @map("safe_contact_ref")
+  requestedActionTypes String[]            @default([]) @map("requested_action_types")
+  requestedSourceTypes String[]            @default([]) @map("requested_source_types")
+  createdAt            DateTime            @default(now()) @map("created_at")
+  updatedAt            DateTime            @updatedAt @map("updated_at")
+  completedAt          DateTime?           @map("completed_at")
+  expiresAt            DateTime?           @map("expires_at")
+
+  client       Client?      @relation(fields: [clientId], references: [id])
+  organization Organization @relation(fields: [orgId], references: [id])
+
+  @@index([clientId])
+  @@index([orgId])
+  @@index([status])
+  @@map("client_intake_sessions")
 }

@@ -33,4 +33,11 @@ export class CleanupTaskRepository {
     });
     return result.count;
   }
+
+  async listForClientId(clientId: string, status?: TaskStatus): Promise<CleanupTask[]> {
+    return this.db.cleanupTask.findMany({
+      where: { case: { is: { clientId } }, ...(status ? { status } : {}) },
+      orderBy: { createdAt: 'asc' },
+    });
+  }
 }
